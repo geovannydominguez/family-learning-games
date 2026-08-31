@@ -1,36 +1,62 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Family Learning Games
 
-## Getting Started
+MVP local de juegos educativos para completar una partida familiar de principio a fin, sin backend ni cuentas.
 
-First, run the development server:
+## Inicio rápido
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Abre [http://localhost:3000](http://localhost:3000) y completa este flujo:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```text
+Inicio → jugador → categoría → dificultad → 10 preguntas → resultado
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+La pantalla final permite repetir la partida con la misma selección o elegir otra categoría conservando el jugador.
 
-## Learn More
+## Contenido de v0.1
 
-To learn more about Next.js, take a look at the following resources:
+| Área | Incluido |
+| --- | --- |
+| Jugadores | Amelia, Joaquín, Papá y Mamá |
+| Categorías | Animales, Espacio y Números |
+| Dificultades | Fácil, Normal y Difícil |
+| Partida | 10 preguntas únicas, feedback inmediato, progreso y puntaje |
+| Resultado | Mensaje personalizado, repetir o elegir otro juego |
+| Datos | 90 preguntas locales: 10 por categoría y dificultad |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Arquitectura
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```text
+Next.js UI
+    ↓
+Application / Game Use Cases
+    ↓
+GameRepository
+    ↓
+MockGameRepository
+    ↓
+JSON local
+```
 
-## Deploy on Vercel
+`src/app/page.tsx` obtiene la configuración mediante el caso de uso de aplicación. Los componentes reciben modelos del dominio y nunca importan el JSON. La selección aleatoria, validación de respuestas, puntaje, avance, resultado y reinicio viven en `src/application/game`.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+El estado de la partida permanece en React y se pierde al recargar la página, según el alcance de v0.1.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Verificación
+
+```bash
+npm test
+npm run lint
+npx tsc --noEmit
+npm run build
+```
+
+Los tests cubren el loop de juego y validan el dataset local completo.
+
+## Fuera de alcance
+
+v0.1 no incluye backend, autenticación, persistencia, APIs externas, infraestructura cloud, IA, audio, multijugador ni una librería de estado global.

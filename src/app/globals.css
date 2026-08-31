@@ -1,26 +1,54 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f5f3ff;
+  --foreground: #172033;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  box-sizing: border-box;
 }
 
 body {
+  min-height: 100vh;
+  margin: 0;
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+  background-image:
+    radial-gradient(circle at 10% 10%, rgb(254 249 195 / 65%), transparent 28%),
+    radial-gradient(circle at 90% 25%, rgb(221 214 254 / 70%), transparent 30%),
+    linear-gradient(180deg, #faf5ff 0%, #eff6ff 100%);
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+@layer components {
+  .page-shell {
+    @apply min-h-screen px-4 sm:px-6 lg:px-8;
+  }
+
+  .card {
+    @apply rounded-3xl border border-white/80 bg-white/90 p-6 shadow-xl shadow-violet-900/10 backdrop-blur-sm sm:p-8;
+  }
+
+  .button-primary {
+    @apply inline-flex min-h-14 items-center justify-center rounded-2xl bg-violet-700 px-6 py-3 text-center text-lg font-black text-white shadow-lg shadow-violet-900/20 outline-none transition hover:bg-violet-800 focus-visible:ring-4 focus-visible:ring-violet-300 active:translate-y-px;
+  }
+
+  .button-secondary {
+    @apply inline-flex min-h-14 items-center justify-center rounded-2xl border-2 border-violet-200 bg-white px-6 py-3 text-center text-lg font-black text-violet-800 outline-none transition hover:bg-violet-50 focus-visible:ring-4 focus-visible:ring-violet-300;
+  }
+
+  .selection-card {
+    @apply min-h-44 rounded-3xl border-2 border-violet-100 bg-white p-6 text-center shadow-md shadow-violet-900/10 outline-none transition hover:-translate-y-1 hover:border-violet-400 hover:bg-violet-50 focus-visible:ring-4 focus-visible:ring-violet-300 active:translate-y-0;
+  }
 }

@@ -1,0 +1,2656 @@
+{
+  "players": [
+    {
+      "id": "amelia",
+      "name": "Amelia",
+      "avatar": "👧"
+    },
+    {
+      "id": "joaquin",
+      "name": "Joaquín",
+      "avatar": "👦"
+    },
+    {
+      "id": "papa",
+      "name": "Papá",
+      "avatar": "👨"
+    },
+    {
+      "id": "mama",
+      "name": "Mamá",
+      "avatar": "👩"
+    }
+  ],
+  "categories": [
+    {
+      "id": "animals",
+      "name": "Animales",
+      "description": "Descubre animales y sus sorprendentes características.",
+      "icon": "🐼"
+    },
+    {
+      "id": "space",
+      "name": "Espacio",
+      "description": "Viaja entre planetas, estrellas y astronautas.",
+      "icon": "🚀"
+    },
+    {
+      "id": "numbers",
+      "name": "Números",
+      "description": "Practica números y operaciones mientras juegas.",
+      "icon": "🔢"
+    }
+  ],
+  "questions": [
+    {
+      "id": "animals-easy-1",
+      "categoryId": "animals",
+      "difficulty": "easy",
+      "text": "¿Qué animal dice miau?",
+      "emoji": "🐱",
+      "answers": [
+        {
+          "id": "animals-easy-1-a1",
+          "text": "Gato",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-easy-1-a2",
+          "text": "Perro",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-1-a3",
+          "text": "Vaca",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-1-a4",
+          "text": "Pato",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-easy-2",
+      "categoryId": "animals",
+      "difficulty": "easy",
+      "text": "¿Qué animal tiene una trompa larga?",
+      "emoji": "🐘",
+      "answers": [
+        {
+          "id": "animals-easy-2-a1",
+          "text": "León",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-2-a2",
+          "text": "Conejo",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-2-a3",
+          "text": "Cebra",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-2-a4",
+          "text": "Elefante",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "animals-easy-3",
+      "categoryId": "animals",
+      "difficulty": "easy",
+      "text": "¿Qué animal vive en el agua y tiene aletas?",
+      "emoji": "🐟",
+      "answers": [
+        {
+          "id": "animals-easy-3-a1",
+          "text": "Caballo",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-3-a2",
+          "text": "Oveja",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-3-a3",
+          "text": "Pez",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-easy-3-a4",
+          "text": "Gallina",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-easy-4",
+      "categoryId": "animals",
+      "difficulty": "easy",
+      "text": "¿Qué animal tiene el cuello muy largo?",
+      "emoji": "🦒",
+      "answers": [
+        {
+          "id": "animals-easy-4-a1",
+          "text": "Cerdo",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-4-a2",
+          "text": "Jirafa",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-easy-4-a3",
+          "text": "Oso",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-4-a4",
+          "text": "Ratón",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-easy-5",
+      "categoryId": "animals",
+      "difficulty": "easy",
+      "text": "¿Qué animal lleva su casa en la espalda?",
+      "emoji": "🐌",
+      "answers": [
+        {
+          "id": "animals-easy-5-a1",
+          "text": "Caracol",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-easy-5-a2",
+          "text": "Águila",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-5-a3",
+          "text": "Mono",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-5-a4",
+          "text": "Tigre",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-easy-6",
+      "categoryId": "animals",
+      "difficulty": "easy",
+      "text": "¿Qué animal salta y tiene orejas largas?",
+      "emoji": "🐰",
+      "answers": [
+        {
+          "id": "animals-easy-6-a1",
+          "text": "Tortuga",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-6-a2",
+          "text": "Pez",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-6-a3",
+          "text": "Vaca",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-6-a4",
+          "text": "Conejo",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "animals-easy-7",
+      "categoryId": "animals",
+      "difficulty": "easy",
+      "text": "¿Qué animal produce miel?",
+      "emoji": "🐝",
+      "answers": [
+        {
+          "id": "animals-easy-7-a1",
+          "text": "Hormiga",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-7-a2",
+          "text": "Mosca",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-7-a3",
+          "text": "Abeja",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-easy-7-a4",
+          "text": "Mariposa",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-easy-8",
+      "categoryId": "animals",
+      "difficulty": "easy",
+      "text": "¿Qué animal dice guau?",
+      "emoji": "🐶",
+      "answers": [
+        {
+          "id": "animals-easy-8-a1",
+          "text": "León",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-8-a2",
+          "text": "Perro",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-easy-8-a3",
+          "text": "Gato",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-8-a4",
+          "text": "Pato",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-easy-9",
+      "categoryId": "animals",
+      "difficulty": "easy",
+      "text": "¿Qué animal tiene rayas blancas y negras?",
+      "emoji": "🦓",
+      "answers": [
+        {
+          "id": "animals-easy-9-a1",
+          "text": "Cebra",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-easy-9-a2",
+          "text": "Elefante",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-9-a3",
+          "text": "Oso",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-9-a4",
+          "text": "Caballo",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-easy-10",
+      "categoryId": "animals",
+      "difficulty": "easy",
+      "text": "¿Qué animal nada y dice cuac?",
+      "emoji": "🦆",
+      "answers": [
+        {
+          "id": "animals-easy-10-a1",
+          "text": "Gallo",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-10-a2",
+          "text": "Cerdo",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-10-a3",
+          "text": "Cabra",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-easy-10-a4",
+          "text": "Pato",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "animals-normal-1",
+      "categoryId": "animals",
+      "difficulty": "normal",
+      "text": "¿Cuál de estos animales es un mamífero marino?",
+      "emoji": "🐬",
+      "answers": [
+        {
+          "id": "animals-normal-1-a1",
+          "text": "Delfín",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-normal-1-a2",
+          "text": "Tiburón",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-1-a3",
+          "text": "Pulpo",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-1-a4",
+          "text": "Sardina",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-normal-2",
+      "categoryId": "animals",
+      "difficulty": "normal",
+      "text": "¿Qué animal cambia de color para camuflarse?",
+      "emoji": "🦎",
+      "answers": [
+        {
+          "id": "animals-normal-2-a1",
+          "text": "Pingüino",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-2-a2",
+          "text": "Caballo",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-2-a3",
+          "text": "Panda",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-2-a4",
+          "text": "Camaleón",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "animals-normal-3",
+      "categoryId": "animals",
+      "difficulty": "normal",
+      "text": "¿Cuál es el animal terrestre más rápido?",
+      "emoji": "🐆",
+      "answers": [
+        {
+          "id": "animals-normal-3-a1",
+          "text": "Caballo",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-3-a2",
+          "text": "Lobo",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-3-a3",
+          "text": "Guepardo",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-normal-3-a4",
+          "text": "León",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-normal-4",
+      "categoryId": "animals",
+      "difficulty": "normal",
+      "text": "¿Qué ave no puede volar y vive en zonas frías?",
+      "emoji": "🐧",
+      "answers": [
+        {
+          "id": "animals-normal-4-a1",
+          "text": "Colibrí",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-4-a2",
+          "text": "Pingüino",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-normal-4-a3",
+          "text": "Águila",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-4-a4",
+          "text": "Loro",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-normal-5",
+      "categoryId": "animals",
+      "difficulty": "normal",
+      "text": "¿Qué animal tiene ocho brazos?",
+      "emoji": "🐙",
+      "answers": [
+        {
+          "id": "animals-normal-5-a1",
+          "text": "Pulpo",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-normal-5-a2",
+          "text": "Cangrejo",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-5-a3",
+          "text": "Calamar",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-5-a4",
+          "text": "Estrella de mar",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-normal-6",
+      "categoryId": "animals",
+      "difficulty": "normal",
+      "text": "¿Qué animal pasa de oruga a adulto?",
+      "emoji": "🦋",
+      "answers": [
+        {
+          "id": "animals-normal-6-a1",
+          "text": "Araña",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-6-a2",
+          "text": "Hormiga",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-6-a3",
+          "text": "Grillo",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-6-a4",
+          "text": "Mariposa",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "animals-normal-7",
+      "categoryId": "animals",
+      "difficulty": "normal",
+      "text": "¿Cuál de estos animales es un reptil?",
+      "emoji": "🐊",
+      "answers": [
+        {
+          "id": "animals-normal-7-a1",
+          "text": "Rana",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-7-a2",
+          "text": "Murciélago",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-7-a3",
+          "text": "Cocodrilo",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-normal-7-a4",
+          "text": "Ballena",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-normal-8",
+      "categoryId": "animals",
+      "difficulty": "normal",
+      "text": "¿Qué animal duerme colgado boca abajo?",
+      "emoji": "🦇",
+      "answers": [
+        {
+          "id": "animals-normal-8-a1",
+          "text": "Mono",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-8-a2",
+          "text": "Murciélago",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-normal-8-a3",
+          "text": "Búho",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-8-a4",
+          "text": "Perezoso",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-normal-9",
+      "categoryId": "animals",
+      "difficulty": "normal",
+      "text": "¿Qué animal construye diques en los ríos?",
+      "emoji": "🦫",
+      "answers": [
+        {
+          "id": "animals-normal-9-a1",
+          "text": "Castor",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-normal-9-a2",
+          "text": "Nutria",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-9-a3",
+          "text": "Topo",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-9-a4",
+          "text": "Mapache",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-normal-10",
+      "categoryId": "animals",
+      "difficulty": "normal",
+      "text": "¿Qué animal tiene una bolsa para llevar a sus crías?",
+      "emoji": "🦘",
+      "answers": [
+        {
+          "id": "animals-normal-10-a1",
+          "text": "Koala",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-10-a2",
+          "text": "Avestruz",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-10-a3",
+          "text": "Llama",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-normal-10-a4",
+          "text": "Canguro",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "animals-hard-1",
+      "categoryId": "animals",
+      "difficulty": "hard",
+      "text": "¿Cuál es el mamífero más grande del planeta?",
+      "emoji": "🐋",
+      "answers": [
+        {
+          "id": "animals-hard-1-a1",
+          "text": "Ballena azul",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-hard-1-a2",
+          "text": "Elefante africano",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-1-a3",
+          "text": "Orca",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-1-a4",
+          "text": "Hipopótamo",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-hard-2",
+      "categoryId": "animals",
+      "difficulty": "hard",
+      "text": "¿Qué grupo animal posee plumas?",
+      "emoji": "🪶",
+      "answers": [
+        {
+          "id": "animals-hard-2-a1",
+          "text": "Reptiles",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-2-a2",
+          "text": "Anfibios",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-2-a3",
+          "text": "Mamíferos",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-2-a4",
+          "text": "Aves",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "animals-hard-3",
+      "categoryId": "animals",
+      "difficulty": "hard",
+      "text": "¿Cómo se llama el proceso por el que una rana cambia desde renacuajo?",
+      "emoji": "🐸",
+      "answers": [
+        {
+          "id": "animals-hard-3-a1",
+          "text": "Hibernación",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-3-a2",
+          "text": "Eclosión",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-3-a3",
+          "text": "Metamorfosis",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-hard-3-a4",
+          "text": "Migración",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-hard-4",
+      "categoryId": "animals",
+      "difficulty": "hard",
+      "text": "¿Cuál de estos animales es un anfibio?",
+      "emoji": "🦎",
+      "answers": [
+        {
+          "id": "animals-hard-4-a1",
+          "text": "Cobra",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-4-a2",
+          "text": "Salamandra",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-hard-4-a3",
+          "text": "Iguana",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-4-a4",
+          "text": "Tortuga",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-hard-5",
+      "categoryId": "animals",
+      "difficulty": "hard",
+      "text": "¿Qué mamífero pone huevos?",
+      "emoji": "🥚",
+      "answers": [
+        {
+          "id": "animals-hard-5-a1",
+          "text": "Ornitorrinco",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-hard-5-a2",
+          "text": "Delfín",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-5-a3",
+          "text": "Perezoso",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-5-a4",
+          "text": "Armadillo",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-hard-6",
+      "categoryId": "animals",
+      "difficulty": "hard",
+      "text": "¿Qué animal tiene tres corazones?",
+      "emoji": "🐙",
+      "answers": [
+        {
+          "id": "animals-hard-6-a1",
+          "text": "Tiburón",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-6-a2",
+          "text": "Medusa",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-6-a3",
+          "text": "Delfín",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-6-a4",
+          "text": "Pulpo",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "animals-hard-7",
+      "categoryId": "animals",
+      "difficulty": "hard",
+      "text": "¿Cuál es el único mamífero capaz de vuelo sostenido?",
+      "emoji": "🦇",
+      "answers": [
+        {
+          "id": "animals-hard-7-a1",
+          "text": "Colugo",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-7-a2",
+          "text": "Petauro",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-7-a3",
+          "text": "Murciélago",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-hard-7-a4",
+          "text": "Ardilla voladora",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-hard-8",
+      "categoryId": "animals",
+      "difficulty": "hard",
+      "text": "¿Cómo respiran principalmente los peces?",
+      "emoji": "🐠",
+      "answers": [
+        {
+          "id": "animals-hard-8-a1",
+          "text": "Por espiráculos",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-8-a2",
+          "text": "Por branquias",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-hard-8-a3",
+          "text": "Por pulmones",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-8-a4",
+          "text": "Por la piel",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-hard-9",
+      "categoryId": "animals",
+      "difficulty": "hard",
+      "text": "¿Qué animal usa ecolocalización para orientarse?",
+      "emoji": "🐬",
+      "answers": [
+        {
+          "id": "animals-hard-9-a1",
+          "text": "Delfín",
+          "isCorrect": true
+        },
+        {
+          "id": "animals-hard-9-a2",
+          "text": "Tortuga",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-9-a3",
+          "text": "Avestruz",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-9-a4",
+          "text": "Jirafa",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "animals-hard-10",
+      "categoryId": "animals",
+      "difficulty": "hard",
+      "text": "¿Cuál de estos animales es invertebrado?",
+      "emoji": "🪼",
+      "answers": [
+        {
+          "id": "animals-hard-10-a1",
+          "text": "Rana",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-10-a2",
+          "text": "Pingüino",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-10-a3",
+          "text": "Lagarto",
+          "isCorrect": false
+        },
+        {
+          "id": "animals-hard-10-a4",
+          "text": "Medusa",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "space-easy-1",
+      "categoryId": "space",
+      "difficulty": "easy",
+      "text": "¿En qué planeta vivimos?",
+      "emoji": "🌍",
+      "answers": [
+        {
+          "id": "space-easy-1-a1",
+          "text": "Tierra",
+          "isCorrect": true
+        },
+        {
+          "id": "space-easy-1-a2",
+          "text": "Marte",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-1-a3",
+          "text": "Júpiter",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-1-a4",
+          "text": "Venus",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-easy-2",
+      "categoryId": "space",
+      "difficulty": "easy",
+      "text": "¿Qué vemos brillante en el cielo durante el día?",
+      "emoji": "☀️",
+      "answers": [
+        {
+          "id": "space-easy-2-a1",
+          "text": "Luna",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-2-a2",
+          "text": "Saturno",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-2-a3",
+          "text": "Cometa",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-2-a4",
+          "text": "Sol",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "space-easy-3",
+      "categoryId": "space",
+      "difficulty": "easy",
+      "text": "¿Cómo se llama quien viaja al espacio?",
+      "emoji": "🧑‍🚀",
+      "answers": [
+        {
+          "id": "space-easy-3-a1",
+          "text": "Bombero",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-3-a2",
+          "text": "Piloto de tren",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-3-a3",
+          "text": "Astronauta",
+          "isCorrect": true
+        },
+        {
+          "id": "space-easy-3-a4",
+          "text": "Marinero",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-easy-4",
+      "categoryId": "space",
+      "difficulty": "easy",
+      "text": "¿Qué objeto usamos para viajar al espacio?",
+      "emoji": "🚀",
+      "answers": [
+        {
+          "id": "space-easy-4-a1",
+          "text": "Tractor",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-4-a2",
+          "text": "Cohete",
+          "isCorrect": true
+        },
+        {
+          "id": "space-easy-4-a3",
+          "text": "Submarino",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-4-a4",
+          "text": "Bicicleta",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-easy-5",
+      "categoryId": "space",
+      "difficulty": "easy",
+      "text": "¿Qué suele verse en el cielo por la noche?",
+      "emoji": "🌙",
+      "answers": [
+        {
+          "id": "space-easy-5-a1",
+          "text": "Luna",
+          "isCorrect": true
+        },
+        {
+          "id": "space-easy-5-a2",
+          "text": "Arcoíris",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-5-a3",
+          "text": "Sol",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-5-a4",
+          "text": "Nube de lluvia",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-easy-6",
+      "categoryId": "space",
+      "difficulty": "easy",
+      "text": "¿Cuál de estos es un planeta?",
+      "emoji": "🔴",
+      "answers": [
+        {
+          "id": "space-easy-6-a1",
+          "text": "Océano",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-6-a2",
+          "text": "Montaña",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-6-a3",
+          "text": "Bosque",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-6-a4",
+          "text": "Marte",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "space-easy-7",
+      "categoryId": "space",
+      "difficulty": "easy",
+      "text": "¿Qué planeta tiene anillos muy visibles?",
+      "emoji": "🪐",
+      "answers": [
+        {
+          "id": "space-easy-7-a1",
+          "text": "Mercurio",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-7-a2",
+          "text": "Marte",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-7-a3",
+          "text": "Saturno",
+          "isCorrect": true
+        },
+        {
+          "id": "space-easy-7-a4",
+          "text": "Tierra",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-easy-8",
+      "categoryId": "space",
+      "difficulty": "easy",
+      "text": "¿Cómo se llama nuestro hogar de estrellas y planetas?",
+      "emoji": "🌌",
+      "answers": [
+        {
+          "id": "space-easy-8-a1",
+          "text": "Selva",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-8-a2",
+          "text": "Galaxia",
+          "isCorrect": true
+        },
+        {
+          "id": "space-easy-8-a3",
+          "text": "Isla",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-8-a4",
+          "text": "Cueva",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-easy-9",
+      "categoryId": "space",
+      "difficulty": "easy",
+      "text": "¿Qué traje protege a un astronauta?",
+      "emoji": "👨‍🚀",
+      "answers": [
+        {
+          "id": "space-easy-9-a1",
+          "text": "Traje espacial",
+          "isCorrect": true
+        },
+        {
+          "id": "space-easy-9-a2",
+          "text": "Traje de baño",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-9-a3",
+          "text": "Pijama",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-9-a4",
+          "text": "Impermeable",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-easy-10",
+      "categoryId": "space",
+      "difficulty": "easy",
+      "text": "¿Qué forma parece tener la Tierra vista desde el espacio?",
+      "emoji": "🌎",
+      "answers": [
+        {
+          "id": "space-easy-10-a1",
+          "text": "Cuadrada",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-10-a2",
+          "text": "Triangular",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-10-a3",
+          "text": "Plana como papel",
+          "isCorrect": false
+        },
+        {
+          "id": "space-easy-10-a4",
+          "text": "Redonda",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "space-normal-1",
+      "categoryId": "space",
+      "difficulty": "normal",
+      "text": "¿Qué planeta es conocido como el planeta rojo?",
+      "emoji": "🔴",
+      "answers": [
+        {
+          "id": "space-normal-1-a1",
+          "text": "Marte",
+          "isCorrect": true
+        },
+        {
+          "id": "space-normal-1-a2",
+          "text": "Venus",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-1-a3",
+          "text": "Neptuno",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-1-a4",
+          "text": "Mercurio",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-normal-2",
+      "categoryId": "space",
+      "difficulty": "normal",
+      "text": "¿Cuál es el planeta más grande del sistema solar?",
+      "emoji": "🟠",
+      "answers": [
+        {
+          "id": "space-normal-2-a1",
+          "text": "Tierra",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-2-a2",
+          "text": "Saturno",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-2-a3",
+          "text": "Marte",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-2-a4",
+          "text": "Júpiter",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "space-normal-3",
+      "categoryId": "space",
+      "difficulty": "normal",
+      "text": "¿Cómo se llama el satélite natural de la Tierra?",
+      "emoji": "🌕",
+      "answers": [
+        {
+          "id": "space-normal-3-a1",
+          "text": "Fobos",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-3-a2",
+          "text": "Europa",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-3-a3",
+          "text": "Luna",
+          "isCorrect": true
+        },
+        {
+          "id": "space-normal-3-a4",
+          "text": "Sol",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-normal-4",
+      "categoryId": "space",
+      "difficulty": "normal",
+      "text": "¿Qué fuerza nos mantiene sobre la Tierra?",
+      "emoji": "🧲",
+      "answers": [
+        {
+          "id": "space-normal-4-a1",
+          "text": "Magnetismo solar",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-4-a2",
+          "text": "Gravedad",
+          "isCorrect": true
+        },
+        {
+          "id": "space-normal-4-a3",
+          "text": "Electricidad",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-4-a4",
+          "text": "Viento",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-normal-5",
+      "categoryId": "space",
+      "difficulty": "normal",
+      "text": "¿Qué planeta está más cerca del Sol?",
+      "emoji": "☀️",
+      "answers": [
+        {
+          "id": "space-normal-5-a1",
+          "text": "Mercurio",
+          "isCorrect": true
+        },
+        {
+          "id": "space-normal-5-a2",
+          "text": "Venus",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-5-a3",
+          "text": "Tierra",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-5-a4",
+          "text": "Marte",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-normal-6",
+      "categoryId": "space",
+      "difficulty": "normal",
+      "text": "¿Cómo se llama el camino de un planeta alrededor del Sol?",
+      "emoji": "⭕",
+      "answers": [
+        {
+          "id": "space-normal-6-a1",
+          "text": "Eclipse",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-6-a2",
+          "text": "Cráter",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-6-a3",
+          "text": "Constelación",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-6-a4",
+          "text": "Órbita",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "space-normal-7",
+      "categoryId": "space",
+      "difficulty": "normal",
+      "text": "¿Qué instrumento permite observar objetos lejanos del espacio?",
+      "emoji": "🔭",
+      "answers": [
+        {
+          "id": "space-normal-7-a1",
+          "text": "Termómetro",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-7-a2",
+          "text": "Brújula",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-7-a3",
+          "text": "Telescopio",
+          "isCorrect": true
+        },
+        {
+          "id": "space-normal-7-a4",
+          "text": "Microscopio",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-normal-8",
+      "categoryId": "space",
+      "difficulty": "normal",
+      "text": "¿Qué planeta es famoso por su color azul intenso?",
+      "emoji": "🔵",
+      "answers": [
+        {
+          "id": "space-normal-8-a1",
+          "text": "Venus",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-8-a2",
+          "text": "Neptuno",
+          "isCorrect": true
+        },
+        {
+          "id": "space-normal-8-a3",
+          "text": "Mercurio",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-8-a4",
+          "text": "Marte",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-normal-9",
+      "categoryId": "space",
+      "difficulty": "normal",
+      "text": "¿Qué cuerpo celeste deja una cola brillante cerca del Sol?",
+      "emoji": "☄️",
+      "answers": [
+        {
+          "id": "space-normal-9-a1",
+          "text": "Cometa",
+          "isCorrect": true
+        },
+        {
+          "id": "space-normal-9-a2",
+          "text": "Planeta",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-9-a3",
+          "text": "Luna",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-9-a4",
+          "text": "Asteroide quieto",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-normal-10",
+      "categoryId": "space",
+      "difficulty": "normal",
+      "text": "¿Cómo se llama un grupo de estrellas con una forma reconocible?",
+      "emoji": "✨",
+      "answers": [
+        {
+          "id": "space-normal-10-a1",
+          "text": "Órbita",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-10-a2",
+          "text": "Atmósfera",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-10-a3",
+          "text": "Marea",
+          "isCorrect": false
+        },
+        {
+          "id": "space-normal-10-a4",
+          "text": "Constelación",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "space-hard-1",
+      "categoryId": "space",
+      "difficulty": "hard",
+      "text": "¿Cuál es la estrella más cercana a la Tierra?",
+      "emoji": "☀️",
+      "answers": [
+        {
+          "id": "space-hard-1-a1",
+          "text": "Sol",
+          "isCorrect": true
+        },
+        {
+          "id": "space-hard-1-a2",
+          "text": "Sirio",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-1-a3",
+          "text": "Polaris",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-1-a4",
+          "text": "Betelgeuse",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-hard-2",
+      "categoryId": "space",
+      "difficulty": "hard",
+      "text": "¿Qué planeta tarda más en completar una órbita alrededor del Sol?",
+      "emoji": "🔵",
+      "answers": [
+        {
+          "id": "space-hard-2-a1",
+          "text": "Tierra",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-2-a2",
+          "text": "Marte",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-2-a3",
+          "text": "Júpiter",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-2-a4",
+          "text": "Neptuno",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "space-hard-3",
+      "categoryId": "space",
+      "difficulty": "hard",
+      "text": "¿En qué galaxia se encuentra el sistema solar?",
+      "emoji": "🌌",
+      "answers": [
+        {
+          "id": "space-hard-3-a1",
+          "text": "Sombrero",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-3-a2",
+          "text": "Triángulo",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-3-a3",
+          "text": "Vía Láctea",
+          "isCorrect": true
+        },
+        {
+          "id": "space-hard-3-a4",
+          "text": "Andrómeda",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-hard-4",
+      "categoryId": "space",
+      "difficulty": "hard",
+      "text": "¿Qué fenómeno ocurre cuando la Luna bloquea la luz del Sol?",
+      "emoji": "🌑",
+      "answers": [
+        {
+          "id": "space-hard-4-a1",
+          "text": "Aurora",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-4-a2",
+          "text": "Eclipse solar",
+          "isCorrect": true
+        },
+        {
+          "id": "space-hard-4-a3",
+          "text": "Eclipse lunar",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-4-a4",
+          "text": "Solsticio",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-hard-5",
+      "categoryId": "space",
+      "difficulty": "hard",
+      "text": "¿Cuál es el planeta más caliente del sistema solar?",
+      "emoji": "🔥",
+      "answers": [
+        {
+          "id": "space-hard-5-a1",
+          "text": "Venus",
+          "isCorrect": true
+        },
+        {
+          "id": "space-hard-5-a2",
+          "text": "Mercurio",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-5-a3",
+          "text": "Marte",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-5-a4",
+          "text": "Júpiter",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-hard-6",
+      "categoryId": "space",
+      "difficulty": "hard",
+      "text": "¿Cómo se llama la explosión de una estrella?",
+      "emoji": "💥",
+      "answers": [
+        {
+          "id": "space-hard-6-a1",
+          "text": "Nebulosa",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-6-a2",
+          "text": "Eclipse",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-6-a3",
+          "text": "Órbita",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-6-a4",
+          "text": "Supernova",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "space-hard-7",
+      "categoryId": "space",
+      "difficulty": "hard",
+      "text": "¿Qué planeta tiene la Gran Mancha Roja?",
+      "emoji": "🟠",
+      "answers": [
+        {
+          "id": "space-hard-7-a1",
+          "text": "Urano",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-7-a2",
+          "text": "Marte",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-7-a3",
+          "text": "Júpiter",
+          "isCorrect": true
+        },
+        {
+          "id": "space-hard-7-a4",
+          "text": "Saturno",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-hard-8",
+      "categoryId": "space",
+      "difficulty": "hard",
+      "text": "¿Qué unidad se usa para medir grandes distancias en el espacio?",
+      "emoji": "💫",
+      "answers": [
+        {
+          "id": "space-hard-8-a1",
+          "text": "Grado Celsius",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-8-a2",
+          "text": "Año luz",
+          "isCorrect": true
+        },
+        {
+          "id": "space-hard-8-a3",
+          "text": "Kilogramo",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-8-a4",
+          "text": "Litro",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-hard-9",
+      "categoryId": "space",
+      "difficulty": "hard",
+      "text": "¿Qué región alrededor de un agujero negro impide escapar a la luz?",
+      "emoji": "⚫",
+      "answers": [
+        {
+          "id": "space-hard-9-a1",
+          "text": "Horizonte de sucesos",
+          "isCorrect": true
+        },
+        {
+          "id": "space-hard-9-a2",
+          "text": "Cinturón de asteroides",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-9-a3",
+          "text": "Corona solar",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-9-a4",
+          "text": "Órbita polar",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "space-hard-10",
+      "categoryId": "space",
+      "difficulty": "hard",
+      "text": "¿Qué planeta gira casi acostado sobre su eje?",
+      "emoji": "🌀",
+      "answers": [
+        {
+          "id": "space-hard-10-a1",
+          "text": "Tierra",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-10-a2",
+          "text": "Mercurio",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-10-a3",
+          "text": "Marte",
+          "isCorrect": false
+        },
+        {
+          "id": "space-hard-10-a4",
+          "text": "Urano",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "numbers-easy-1",
+      "categoryId": "numbers",
+      "difficulty": "easy",
+      "text": "¿Cuánto es 1 + 1?",
+      "emoji": "➕",
+      "answers": [
+        {
+          "id": "numbers-easy-1-a1",
+          "text": "2",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-easy-1-a2",
+          "text": "1",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-1-a3",
+          "text": "3",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-1-a4",
+          "text": "4",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-easy-2",
+      "categoryId": "numbers",
+      "difficulty": "easy",
+      "text": "¿Qué número viene después del 4?",
+      "emoji": "5️⃣",
+      "answers": [
+        {
+          "id": "numbers-easy-2-a1",
+          "text": "3",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-2-a2",
+          "text": "6",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-2-a3",
+          "text": "7",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-2-a4",
+          "text": "5",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "numbers-easy-3",
+      "categoryId": "numbers",
+      "difficulty": "easy",
+      "text": "¿Cuántas estrellas hay? ⭐ ⭐ ⭐",
+      "emoji": "⭐",
+      "answers": [
+        {
+          "id": "numbers-easy-3-a1",
+          "text": "2",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-3-a2",
+          "text": "4",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-3-a3",
+          "text": "3",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-easy-3-a4",
+          "text": "1",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-easy-4",
+      "categoryId": "numbers",
+      "difficulty": "easy",
+      "text": "¿Cuánto es 5 - 2?",
+      "emoji": "➖",
+      "answers": [
+        {
+          "id": "numbers-easy-4-a1",
+          "text": "5",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-4-a2",
+          "text": "3",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-easy-4-a3",
+          "text": "2",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-4-a4",
+          "text": "4",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-easy-5",
+      "categoryId": "numbers",
+      "difficulty": "easy",
+      "text": "¿Cuál número es mayor?",
+      "emoji": "🔢",
+      "answers": [
+        {
+          "id": "numbers-easy-5-a1",
+          "text": "9",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-easy-5-a2",
+          "text": "2",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-5-a3",
+          "text": "4",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-5-a4",
+          "text": "6",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-easy-6",
+      "categoryId": "numbers",
+      "difficulty": "easy",
+      "text": "¿Cuánto es 2 + 3?",
+      "emoji": "➕",
+      "answers": [
+        {
+          "id": "numbers-easy-6-a1",
+          "text": "4",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-6-a2",
+          "text": "6",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-6-a3",
+          "text": "7",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-6-a4",
+          "text": "5",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "numbers-easy-7",
+      "categoryId": "numbers",
+      "difficulty": "easy",
+      "text": "¿Qué número viene antes del 8?",
+      "emoji": "7️⃣",
+      "answers": [
+        {
+          "id": "numbers-easy-7-a1",
+          "text": "8",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-7-a2",
+          "text": "9",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-7-a3",
+          "text": "7",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-easy-7-a4",
+          "text": "6",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-easy-8",
+      "categoryId": "numbers",
+      "difficulty": "easy",
+      "text": "¿Cuántos lados tiene un triángulo?",
+      "emoji": "🔺",
+      "answers": [
+        {
+          "id": "numbers-easy-8-a1",
+          "text": "5",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-8-a2",
+          "text": "3",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-easy-8-a3",
+          "text": "2",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-8-a4",
+          "text": "4",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-easy-9",
+      "categoryId": "numbers",
+      "difficulty": "easy",
+      "text": "¿Cuánto es 4 - 1?",
+      "emoji": "➖",
+      "answers": [
+        {
+          "id": "numbers-easy-9-a1",
+          "text": "3",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-easy-9-a2",
+          "text": "1",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-9-a3",
+          "text": "2",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-9-a4",
+          "text": "4",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-easy-10",
+      "categoryId": "numbers",
+      "difficulty": "easy",
+      "text": "¿Cuál de estos números es cero?",
+      "emoji": "0️⃣",
+      "answers": [
+        {
+          "id": "numbers-easy-10-a1",
+          "text": "1",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-10-a2",
+          "text": "6",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-10-a3",
+          "text": "10",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-easy-10-a4",
+          "text": "0",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "numbers-normal-1",
+      "categoryId": "numbers",
+      "difficulty": "normal",
+      "text": "¿Cuánto es 7 + 6?",
+      "emoji": "➕",
+      "answers": [
+        {
+          "id": "numbers-normal-1-a1",
+          "text": "13",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-normal-1-a2",
+          "text": "11",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-1-a3",
+          "text": "12",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-1-a4",
+          "text": "14",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-normal-2",
+      "categoryId": "numbers",
+      "difficulty": "normal",
+      "text": "¿Cuánto es 15 - 7?",
+      "emoji": "➖",
+      "answers": [
+        {
+          "id": "numbers-normal-2-a1",
+          "text": "6",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-2-a2",
+          "text": "7",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-2-a3",
+          "text": "9",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-2-a4",
+          "text": "8",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "numbers-normal-3",
+      "categoryId": "numbers",
+      "difficulty": "normal",
+      "text": "¿Cuánto es 4 × 3?",
+      "emoji": "✖️",
+      "answers": [
+        {
+          "id": "numbers-normal-3-a1",
+          "text": "10",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-3-a2",
+          "text": "14",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-3-a3",
+          "text": "12",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-normal-3-a4",
+          "text": "7",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-normal-4",
+      "categoryId": "numbers",
+      "difficulty": "normal",
+      "text": "¿Cuál es la mitad de 18?",
+      "emoji": "➗",
+      "answers": [
+        {
+          "id": "numbers-normal-4-a1",
+          "text": "10",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-4-a2",
+          "text": "9",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-normal-4-a3",
+          "text": "6",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-4-a4",
+          "text": "8",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-normal-5",
+      "categoryId": "numbers",
+      "difficulty": "normal",
+      "text": "¿Qué número sigue en 2, 4, 6, ...?",
+      "emoji": "🔢",
+      "answers": [
+        {
+          "id": "numbers-normal-5-a1",
+          "text": "8",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-normal-5-a2",
+          "text": "7",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-5-a3",
+          "text": "9",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-5-a4",
+          "text": "10",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-normal-6",
+      "categoryId": "numbers",
+      "difficulty": "normal",
+      "text": "¿Cuánto es 20 ÷ 4?",
+      "emoji": "➗",
+      "answers": [
+        {
+          "id": "numbers-normal-6-a1",
+          "text": "4",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-6-a2",
+          "text": "6",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-6-a3",
+          "text": "8",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-6-a4",
+          "text": "5",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "numbers-normal-7",
+      "categoryId": "numbers",
+      "difficulty": "normal",
+      "text": "¿Cuánto es 9 + 8?",
+      "emoji": "➕",
+      "answers": [
+        {
+          "id": "numbers-normal-7-a1",
+          "text": "16",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-7-a2",
+          "text": "18",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-7-a3",
+          "text": "17",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-normal-7-a4",
+          "text": "15",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-normal-8",
+      "categoryId": "numbers",
+      "difficulty": "normal",
+      "text": "¿Cuántas decenas hay en 30?",
+      "emoji": "3️⃣",
+      "answers": [
+        {
+          "id": "numbers-normal-8-a1",
+          "text": "30",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-8-a2",
+          "text": "3",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-normal-8-a3",
+          "text": "2",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-8-a4",
+          "text": "10",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-normal-9",
+      "categoryId": "numbers",
+      "difficulty": "normal",
+      "text": "¿Cuánto es 6 × 2?",
+      "emoji": "✖️",
+      "answers": [
+        {
+          "id": "numbers-normal-9-a1",
+          "text": "12",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-normal-9-a2",
+          "text": "8",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-9-a3",
+          "text": "10",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-9-a4",
+          "text": "14",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-normal-10",
+      "categoryId": "numbers",
+      "difficulty": "normal",
+      "text": "¿Cuál es el doble de 7?",
+      "emoji": "2️⃣",
+      "answers": [
+        {
+          "id": "numbers-normal-10-a1",
+          "text": "9",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-10-a2",
+          "text": "12",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-10-a3",
+          "text": "16",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-normal-10-a4",
+          "text": "14",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "numbers-hard-1",
+      "categoryId": "numbers",
+      "difficulty": "hard",
+      "text": "¿Cuánto es 12 × 8?",
+      "emoji": "✖️",
+      "answers": [
+        {
+          "id": "numbers-hard-1-a1",
+          "text": "96",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-hard-1-a2",
+          "text": "86",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-1-a3",
+          "text": "92",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-1-a4",
+          "text": "108",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-hard-2",
+      "categoryId": "numbers",
+      "difficulty": "hard",
+      "text": "¿Cuánto es 144 ÷ 12?",
+      "emoji": "➗",
+      "answers": [
+        {
+          "id": "numbers-hard-2-a1",
+          "text": "10",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-2-a2",
+          "text": "14",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-2-a3",
+          "text": "16",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-2-a4",
+          "text": "12",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "numbers-hard-3",
+      "categoryId": "numbers",
+      "difficulty": "hard",
+      "text": "¿Cuál es el 25% de 80?",
+      "emoji": "%",
+      "answers": [
+        {
+          "id": "numbers-hard-3-a1",
+          "text": "25",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-3-a2",
+          "text": "40",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-3-a3",
+          "text": "20",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-hard-3-a4",
+          "text": "15",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-hard-4",
+      "categoryId": "numbers",
+      "difficulty": "hard",
+      "text": "¿Cuánto es (6 + 4) × 3?",
+      "emoji": "🧮",
+      "answers": [
+        {
+          "id": "numbers-hard-4-a1",
+          "text": "34",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-4-a2",
+          "text": "30",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-hard-4-a3",
+          "text": "18",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-4-a4",
+          "text": "24",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-hard-5",
+      "categoryId": "numbers",
+      "difficulty": "hard",
+      "text": "¿Qué número primo viene después del 11?",
+      "emoji": "🔢",
+      "answers": [
+        {
+          "id": "numbers-hard-5-a1",
+          "text": "13",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-hard-5-a2",
+          "text": "12",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-5-a3",
+          "text": "14",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-5-a4",
+          "text": "15",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-hard-6",
+      "categoryId": "numbers",
+      "difficulty": "hard",
+      "text": "¿Cuánto es 7²?",
+      "emoji": "²",
+      "answers": [
+        {
+          "id": "numbers-hard-6-a1",
+          "text": "14",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-6-a2",
+          "text": "42",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-6-a3",
+          "text": "56",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-6-a4",
+          "text": "49",
+          "isCorrect": true
+        }
+      ]
+    },
+    {
+      "id": "numbers-hard-7",
+      "categoryId": "numbers",
+      "difficulty": "hard",
+      "text": "¿Cuál es el mínimo común múltiplo de 4 y 6?",
+      "emoji": "🧮",
+      "answers": [
+        {
+          "id": "numbers-hard-7-a1",
+          "text": "18",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-7-a2",
+          "text": "24",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-7-a3",
+          "text": "12",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-hard-7-a4",
+          "text": "8",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-hard-8",
+      "categoryId": "numbers",
+      "difficulty": "hard",
+      "text": "¿Cuánto es 3/4 de 100?",
+      "emoji": "➗",
+      "answers": [
+        {
+          "id": "numbers-hard-8-a1",
+          "text": "80",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-8-a2",
+          "text": "75",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-hard-8-a3",
+          "text": "25",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-8-a4",
+          "text": "50",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-hard-9",
+      "categoryId": "numbers",
+      "difficulty": "hard",
+      "text": "¿Qué valor tiene 2³?",
+      "emoji": "³",
+      "answers": [
+        {
+          "id": "numbers-hard-9-a1",
+          "text": "8",
+          "isCorrect": true
+        },
+        {
+          "id": "numbers-hard-9-a2",
+          "text": "6",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-9-a3",
+          "text": "9",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-9-a4",
+          "text": "12",
+          "isCorrect": false
+        }
+      ]
+    },
+    {
+      "id": "numbers-hard-10",
+      "categoryId": "numbers",
+      "difficulty": "hard",
+      "text": "Si x + 9 = 17, ¿cuánto vale x?",
+      "emoji": "❓",
+      "answers": [
+        {
+          "id": "numbers-hard-10-a1",
+          "text": "6",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-10-a2",
+          "text": "7",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-10-a3",
+          "text": "9",
+          "isCorrect": false
+        },
+        {
+          "id": "numbers-hard-10-a4",
+          "text": "8",
+          "isCorrect": true
+        }
+      ]
+    }
+  ]
+}
