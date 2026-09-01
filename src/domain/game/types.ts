@@ -54,9 +54,3 @@ export interface Result {
   score: number;
   total: number;
 }
-
-export interface GameSetup {
-  players: Player[];
-  categories: Category[];
-  questions: Question[];
-}

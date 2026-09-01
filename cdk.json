@@ -1,0 +1,6 @@
+{
+  "app": "node infra/bin/family-learning-games.ts",
+  "context": {
+    "frontendOrigin": "http://localhost:3000"
+  }
+}
