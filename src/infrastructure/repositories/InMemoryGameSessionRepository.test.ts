@@ -12,9 +12,9 @@ const questions: Question[] = Array.from({ length: 10 }, (_, index) => ({ id: `q
 test("stores, replaces and retrieves sessions by id", async () => {
   const repository = new InMemoryGameSessionRepository();
   const session = createGameSession({ player, category, difficulty: "easy", questions, random: () => 0 });
-  await repository.save("one", session);
+  await repository.create("one", session);
   assert.deepEqual(await repository.findById("one"), session);
-  await repository.save("one", { ...session, score: 2 });
+  await repository.update("one", { ...session, score: 2, revision: 1 }, 0);
   assert.equal((await repository.findById("one"))?.score, 2);
   assert.equal(await repository.findById("missing"), null);
 });

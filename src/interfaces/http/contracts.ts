@@ -19,4 +19,10 @@ export interface RequestLog {
   path: string;
   statusCode: number;
   durationMs: number;
+  error?: {
+    category: "persistence" | "unexpected";
+    name: string;
+    operation: string;
+    resourceId?: string;
+  };
 }

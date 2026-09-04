@@ -36,6 +36,7 @@ export interface PlayerAnswer {
 }
 
 export interface GameSession {
+  revision: number;
   player: Player;
   category: Category;
   difficulty: Difficulty;
@@ -45,6 +46,14 @@ export interface GameSession {
   answers: PlayerAnswer[];
   selectedAnswerId: string | null;
   status: "playing" | "completed";
+}
+
+export interface Game {
+  id: string;
+  title: string;
+  category: Category;
+  players: Player[];
+  questions: Question[];
 }
 
 export interface Result {

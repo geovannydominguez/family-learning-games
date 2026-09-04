@@ -1,590 +1,604 @@
-# Family Learning Games — Agent Guide
+# Family Learning Games — AGENTS.md
 
-## Product goal
+## Project
 
-Family Learning Games starts as a small family learning game and may evolve later into a public educational platform.
+Family Learning Games is an incremental family-oriented learning game platform.
 
-The current priority remains:
+The project must evolve progressively, preserving architectural clarity and avoiding unnecessary complexity.
 
-> Be able to play a complete game with the family while evolving the architecture progressively and intentionally.
+Current target version:
 
-Do not optimize prematurely for hypothetical future scale.
+> **v0.3 — Durable Persistence**
+
+Current roadmap phase:
+
+> **FASE 3 — Persistencia**
 
 ---
 
-## Current stage
+## Mandatory documentation to read first
 
-We are currently building:
+Before changing code, read and follow these files:
 
-**v0.2 — Serverless Backend Foundation**
+1. `AGENTS.md`
+2. `docs/architecture/ARCHITECTURE-v0.3.md`
+3. `docs/architecture/ADR-006-dynamodb-persistence.md`
+4. `docs/architecture/ADR-007-dynamodb-data-model.md`
+5. `docs/architecture/REQUIREMENTS-v0.3.md`
 
-The goal of v0.2 is to introduce the first AWS serverless backend while preserving the complete playable experience achieved in v0.1.
+Also review previous architecture decisions when relevant:
 
-Target architecture:
+- `docs/architecture/ARCHITECTURE-v0.1.md`
+- `docs/architecture/ARCHITECTURE-v0.2.md`
+- `docs/architecture/ADR-001.md`
+- `docs/architecture/ADR-002.md`
+- `docs/architecture/ADR-003-serverless-backend.md`
+- `docs/architecture/ADR-004-api-gateway-http-api.md`
+- `docs/architecture/ADR-005-aws-cdk.md`
+
+If requirements conflict, prefer the most recent accepted architecture/ADR for the current version.
+
+Do not silently reinterpret architectural decisions.
+
+---
+
+## Current architecture
+
+The target architecture for v0.3 is:
 
 ```text
-Browser
-   |
-   v
 Next.js
-   |
-   | HTTPS
-   v
+   │
+   ▼
+GameApiClient
+   │
+   ▼
 API Gateway HTTP API
-   |
-   v
+   │
+   ▼
 AWS Lambda
-   |
-   v
-Application Layer
-   |
-   v
-Domain
-   |
-   v
-Repository abstraction
-   |
-   v
-Local / JSON implementation
+   │
+   ▼
+Application / Domain
+   │
+   ▼
+Repository Contracts
+   │
+   ├──────────────────────────────┐
+   ▼                              ▼
+DynamoDbGameRepository     DynamoDbGameSessionRepository
+   │                              │
+   └──────────────┬───────────────┘
+                  ▼
+               DynamoDB
 ```
 
-The frontend must stop reading game data directly from local repositories.
+The main architectural change from v0.2 to v0.3 is:
 
-The backend becomes the owner of game retrieval and game-session operations.
-
----
-
-## Technology baseline
-
-Current project baseline:
-
-* Next.js 15.5.x
-* React 19
-* TypeScript
-* App Router
-* Tailwind CSS
-* ESLint
-* npm
-
-v0.2 additionally introduces:
-
-* AWS Lambda
-* Amazon API Gateway HTTP API
-* AWS CDK with TypeScript
-* Amazon CloudWatch Logs
-
-Do not upgrade major framework versions unless explicitly requested.
-
-Do not introduce additional AWS services unless they are required by the approved v0.2 scope.
+> Replace runtime JSON/in-memory persistence with DynamoDB while preserving the existing domain/application boundaries and repository abstractions.
 
 ---
 
-## Architecture source of truth
+## Core engineering principles
 
-Before making architectural changes, read:
+These rules are mandatory.
 
-* `docs/architecture/ARCHITECTURE-v0.2.md`
-* `docs/architecture/ADR-001.md`
-* `docs/architecture/ADR-002.md`
-* `docs/architecture/ADR-003-serverless-backend.md`
-* `docs/architecture/ADR-004-api-gateway-http-api.md`
-* `docs/architecture/ADR-005-aws-cdk.md`
+### 1. Keep Domain AWS-independent
 
-These documents are the current source of truth for accepted architecture decisions.
+The domain layer must not depend on:
 
-If implementation conflicts with an accepted ADR, preserve the ADR unless the user explicitly requests a change.
+- AWS SDK
+- DynamoDB types
+- API Gateway event types
+- Lambda runtime types
+- CDK constructs
+- environment variables
 
-Do not silently replace, bypass or reinterpret accepted architecture decisions.
+The domain must remain plain TypeScript.
 
----
+### 2. Keep Application independent from infrastructure
 
-## Core architecture principles
+Application/use-case code must depend on repository interfaces/contracts, not concrete DynamoDB implementations.
 
-### 1. Preserve domain independence
-
-AWS infrastructure must not leak into domain logic.
-
-The domain must not import:
-
-* API Gateway event types
-* Lambda context types
-* CDK constructs
-* AWS SDK clients
-* HTTP-specific DTOs
-
-AWS-specific code belongs at the infrastructure or interface boundary.
-
-Preferred direction:
+Correct:
 
 ```text
-HTTP / AWS Adapter
-        |
-        v
 Application
-        |
-        v
-Domain
-        |
-        v
-Repository Port
-        |
-        v
-Repository Implementation
-```
-
-### 2. Frontend communicates through HTTP
-
-v0.1 allowed:
-
-```text
-Next.js
-   |
-   v
+   ↓
 GameRepository
-   |
-   v
-MockGameRepository
-```
-
-v0.2 must evolve toward:
-
-```text
-Next.js
-   |
-   v
-ApiGameRepository / API Client
-   |
-   v
-Backend HTTP API
-```
-
-The frontend must not directly import backend repository implementations or local JSON sources.
-
-### 3. Preserve repository abstraction
-
-Application and domain code must depend on repository contracts, not concrete persistence technology.
-
-Example:
-
-```ts
-interface GameRepository {
-  findAll(): Promise<Game[]>;
-  findById(id: string): Promise<Game | null>;
-}
-```
-
-For v0.2, a local or JSON-backed implementation is acceptable.
-
-The purpose is to allow a later replacement such as:
-
-```text
-JsonGameRepository
-        |
-        v
+   ↓
 DynamoDbGameRepository
 ```
 
-without rewriting domain rules.
+Incorrect:
 
-Do not introduce DynamoDB in v0.2.
+```text
+Application
+   ↓
+DynamoDBDocumentClient
+```
 
-### 4. Keep the backend small
+### 3. Infrastructure implements repository contracts
 
-The backend is not a microservices platform.
+AWS-specific implementation belongs in infrastructure.
+
+Examples:
+
+```text
+src/infrastructure/
+├── persistence/
+│   ├── DynamoDbGameRepository.ts
+│   └── DynamoDbGameSessionRepository.ts
+└── http/
+```
+
+Exact placement may follow the existing repository structure, but do not move unrelated code without a clear reason.
+
+### 4. Preserve incremental architecture
+
+Do not redesign the complete project.
+
+Do not introduce abstractions because they might be useful someday.
+
+Implement only what v0.3 requires.
 
 Prefer:
 
-* one small backend stack
-* one API Gateway HTTP API
-* one or a very small number of Lambda functions
-* simple routing
-* direct application use cases
-* minimal dependencies
-
-Avoid splitting functions or services by hypothetical future scale.
-
----
-
-## v0.2 functional goal
-
-The complete v0.1 game flow must continue to work:
-
 ```text
-Home
-  |
-  v
-Choose game
-  |
-  v
-Start game
-  |
-  v
-Answer question
-  |
-  v
-Immediate feedback
-  |
-  v
-Next question
-  |
-  v
-Final result
-  |
-  v
-Play again
+small change
+→ tested
+→ understandable
+→ deployable
 ```
 
-The difference is architectural:
-
-> The browser retrieves and submits game information through the AWS backend API.
-
-The first game remains a simple quiz.
-
-Initial game scope remains:
-
-* 5 questions
-* 4 answer options
-* exactly 1 correct answer
-* immediate correct/incorrect feedback
-* current question progress
-* accumulated score
-* final result
-* replay capability
-
-Do not expand product scope merely because a backend now exists.
-
----
-
-## Initial HTTP API
-
-The backend should expose only the operations required to preserve the playable flow.
-
-Candidate API:
+over:
 
 ```text
-GET  /games
-GET  /games/{gameId}
-POST /game-sessions
-POST /game-sessions/{sessionId}/answers
-GET  /game-sessions/{sessionId}
+large future-proof redesign
 ```
 
-The exact implementation may be simplified if the current domain model does not require every endpoint yet.
+### 5. Repository contracts remain the persistence boundary
 
-Do not create unused endpoints only to match a future-looking API design.
+The existing repository interfaces are intentional architectural boundaries.
 
-Prefer the smallest contract that supports the current flow cleanly.
+Prefer adapting concrete implementations rather than changing domain/application APIs.
+
+Change a repository contract only when the current contract cannot correctly express a v0.3 requirement.
+
+If changing a contract is necessary:
+
+1. explain why,
+2. keep the change minimal,
+3. update tests,
+4. preserve separation of concerns.
 
 ---
 
-## Backend layering
+## v0.3 persistence decisions
 
-Preferred responsibility boundaries:
+### DynamoDB is the persistence technology
+
+Use Amazon DynamoDB for durable persistence.
+
+Do not replace it with:
+
+- RDS
+- PostgreSQL
+- Aurora
+- MongoDB
+- Redis
+- S3-as-database
+
+unless an accepted ADR explicitly changes this decision.
+
+### Tables
+
+v0.3 should remain simple.
+
+Use two logical persistence models:
 
 ```text
-src/
-  domain/
-  application/
-  infrastructure/
-  interfaces/
+Games
+└── PK: gameId
+
+GameSessions
+└── PK: sessionId
 ```
 
-### `domain/`
+Do not introduce a complex single-table design in v0.3.
 
-Pure business concepts and rules: Game, Question, Answer, GameSession, scoring and validation.
+Do not add secondary indexes unless an actual current access pattern requires them.
 
-Must remain independent from AWS and HTTP.
+### Game persistence
 
-### `application/`
+A game may be stored as a single DynamoDB item containing its questions.
 
-Use cases and orchestration such as ListGames, GetGame, StartGameSession, SubmitAnswer and GetGameSession.
-
-Application code may depend on repository interfaces.
-
-### `infrastructure/`
-
-Technology-specific implementations such as JsonGameRepository, in-memory session repository and AWS-specific wiring.
-
-### `interfaces/`
-
-Inbound adapters such as Lambda HTTP handlers, request mapping, response mapping and HTTP validation.
-
-Do not introduce additional layers unless a concrete requirement justifies them.
-
----
-
-## Serverless runtime
-
-v0.2 uses:
+Conceptually:
 
 ```text
-Amazon API Gateway HTTP API
-        |
-        v
-AWS Lambda
+Game
+├── gameId
+├── title
+├── category
+├── difficulty
+└── questions[]
 ```
 
-Do not introduce ECS, EKS, EC2, App Runner or containers for the application runtime unless the architecture is explicitly reconsidered through a new ADR.
+Do not normalize questions/options into additional tables without a current requirement.
+
+### Session persistence
+
+Game sessions must survive Lambda container replacement/restart.
+
+Do not use in-memory state as the runtime source of truth.
+
+Session state stored in DynamoDB should support the current game flow, including:
+
+- session identification,
+- selected game,
+- current question/progress,
+- score,
+- answers or state required by the existing use cases,
+- completion state,
+- concurrency/version information when needed.
+
+Reuse existing domain models where practical.
+
+Do not expose DynamoDB storage structures directly to the domain.
 
 ---
 
-## Infrastructure as Code
+## Concurrency and idempotency
 
-AWS resources for v0.2 must be managed with:
+Persistence introduces concurrency concerns.
 
-> AWS CDK + TypeScript
-
-Do not create the project architecture manually in the AWS Console as the source of truth.
-
-Expected resources:
+Session updates must not rely only on:
 
 ```text
-FamilyLearningGamesBackendStack
-        |
-        +-- API Gateway HTTP API
-        +-- Lambda
-        +-- IAM permissions
-        +-- CloudWatch Logs
+read
+→ modify
+→ unconditional save
 ```
 
-Do not add speculative infrastructure.
+when concurrent requests could corrupt progress.
 
----
+Use DynamoDB conditional writes / optimistic concurrency where required.
 
-## Observability
+For example, an answer request should not be able to advance the same expected question twice.
 
-Use structured application logging where practical.
-
-Useful minimum request context:
+Conceptually:
 
 ```text
-requestId
-timestamp
-method
-path
-statusCode
-durationMs
+expected currentQuestionIndex == persisted currentQuestionIndex
 ```
 
-CloudWatch Logs is sufficient for v0.2.
+If the condition fails:
 
-Do not introduce advanced observability platforms without an approved requirement.
+- return an application-level conflict/error,
+- do not leak DynamoDB implementation details,
+- do not silently overwrite the latest session state.
 
----
-
-## UX principles
-
-The application is initially intended for family use, including small children.
-
-Prefer:
-
-* large touch targets
-* simple navigation
-* readable typography
-* few decisions per screen
-* clear feedback
-* responsive mobile, tablet and desktop layouts
-* playful but simple visuals
-
-Avoid dense interfaces and unnecessary configuration.
-
-Backend evolution must not degrade the simple family experience.
+HTTP mapping may use `409 Conflict` when consistent with the existing API error model.
 
 ---
 
-## Coding principles
+## Seed data
 
-Prefer:
+The current local JSON game data may remain in the repository as:
 
-* strict TypeScript
-* descriptive names
-* small understandable components
-* simple functions
-* explicit code over clever abstractions
-* clear separation between game logic and presentation
-* repository contracts at real architectural boundaries
-* minimal dependencies
-* testable domain and application code
+- fixture,
+- seed input,
+- development data.
 
-Avoid premature abstraction.
+But JSON must no longer be the runtime persistence source for the AWS backend.
 
-Do not build architecture for hypothetical future requirements.
+Provide a simple repeatable seed mechanism for development.
+
+Preferred concept:
+
+```text
+existing JSON
+    ↓
+seed script
+    ↓
+DynamoDB Games table
+```
+
+The seed mechanism should be safe to rerun when practical.
+
+Do not build an admin UI for game management in v0.3.
 
 ---
 
-## Explicitly out of scope for v0.2
+## AWS CDK rules
+
+Infrastructure remains managed with AWS CDK using TypeScript.
+
+v0.3 CDK changes should include only what is necessary, such as:
+
+- DynamoDB tables,
+- Lambda environment variables containing table names,
+- IAM permissions required by Lambda,
+- outputs when useful.
+
+Prefer least-privilege IAM.
+
+Do not grant broad permissions such as:
+
+```text
+dynamodb:*
+Resource: *
+```
+
+when table-scoped permissions can be used.
+
+---
+
+## Development environment and cost control
+
+This is still a development-stage personal project.
+
+Prefer DynamoDB on-demand billing for v0.3 unless an accepted ADR says otherwise.
+
+Development resources should remain easy to destroy and recreate.
+
+For disposable development tables, destructive removal behavior is acceptable when explicitly configured for the development stack.
+
+Do not assume production retention policies yet.
+
+Do not add unnecessary always-on AWS resources.
+
+---
+
+## Allowed changes in v0.3
+
+The following are in scope:
+
+- DynamoDB tables
+- AWS SDK DynamoDB client usage inside infrastructure
+- DynamoDB repository implementations
+- repository wiring/composition changes
+- Lambda IAM permissions for DynamoDB
+- Lambda environment configuration for table names
+- seed script for initial games
+- persistence mapping code
+- conditional writes / optimistic concurrency
+- unit tests
+- infrastructure tests where useful
+- updates needed to preserve the existing API behavior
+- small refactors necessary to support durable persistence
+
+---
+
+## Explicitly out of scope for v0.3
 
 Do not introduce:
 
-* DynamoDB
-* Aurora
-* RDS
-* databases
-* persistent game sessions
-* AWS Cognito
-* authentication
-* user accounts
-* family profiles
-* authorization
-* Amazon Bedrock
-* OpenAI integration
-* generative AI
-* automatic question generation
-* image generation
-* Amazon Polly
-* audio generation
-* multiplayer
-* WebSockets
-* AWS AppSync
-* EventBridge
-* SQS
-* SNS
-* Step Functions
-* WAF
-* complex CloudFront configuration
-* microservices
-* CQRS
-* Event Bus
-* formal DDD
-* dependency injection frameworks
-* Redux
-* Zustand
+- Amazon Cognito
+- user authentication
+- family accounts
+- family profiles
+- child profiles
+- AI-generated games
+- Amazon Bedrock
+- OpenAI integration
+- SQS
+- SNS
+- EventBridge
+- Step Functions
+- WebSockets
+- multiplayer
+- leaderboards
+- analytics pipelines
+- Redis / ElastiCache
+- RDS / Aurora
+- GraphQL / AppSync
+- S3 persistence for game/session records
+- admin portal
+- mobile native app
+- PWA-specific features
+- audio/image generation
+- production-grade multi-environment platform redesign
 
-React Query should only be introduced if there is a concrete frontend data-fetching need that materially improves the implementation. It is not required by v0.2.
-
-Do not create placeholders for out-of-scope technologies.
+These belong to later roadmap phases unless explicitly requested and approved.
 
 ---
 
-## Evolution strategy
+## API compatibility
 
-### v0.1
+The frontend should continue consuming the backend through `GameApiClient`.
+
+Do not make React components call DynamoDB or AWS SDKs directly.
+
+Preserve the existing HTTP API contract whenever possible.
+
+A persistence implementation change should not require unnecessary frontend rewrites.
+
+If an API contract must change, make it explicit and keep it minimal.
+
+---
+
+## Error handling
+
+Translate infrastructure errors into application/API errors.
+
+Do not leak:
+
+- DynamoDB exception names,
+- AWS request IDs,
+- table internals,
+- stack traces,
+- AWS SDK objects
+
+to clients.
+
+Expected error classes should remain meaningful at the application/API level.
+
+Examples:
 
 ```text
-Next.js
-   |
-   v
-GameRepository
-   |
-   v
-MockGameRepository
-   |
-   v
-Local JSON
+GAME_NOT_FOUND
+SESSION_NOT_FOUND
+INVALID_ANSWER
+SESSION_CONFLICT
+MISSING_CONFIGURATION
 ```
 
-### v0.2
-
-```text
-Next.js
-   |
-   v
-HTTP API Client
-   |
-   v
-API Gateway HTTP API
-   |
-   v
-Lambda
-   |
-   v
-Application / Domain
-   |
-   v
-Repository
-   |
-   v
-Local / JSON implementation
-```
-
-### Planned next stage
-
-v0.3 / Phase 3 introduces persistence:
-
-```text
-Repository
-   |
-   v
-DynamoDbRepository
-```
-
-Persistence must be introduced only when that roadmap phase begins.
+Reuse existing conventions where they already exist.
 
 ---
 
-## Decision rule
+## Configuration
 
-When choosing between:
+Do not hardcode DynamoDB table names inside repository code.
 
-1. a simple solution that solves the current approved v0.2 requirement, and
-2. a more flexible solution designed for hypothetical future requirements,
+Read them from environment/configuration supplied by infrastructure.
 
-choose the simple solution.
+Fail fast with a clear configuration error if required configuration is missing.
 
-Only introduce additional complexity when there is a concrete approved requirement or an accepted ADR.
-
----
-
-## Working with existing code
-
-Before changing code:
-
-1. Inspect the existing project structure.
-2. Read the current architecture document and ADRs.
-3. Preserve useful existing conventions.
-4. Reuse the domain and application logic created in v0.1 where appropriate.
-5. Prefer modifying existing files over duplicating concepts.
-6. Keep AWS-specific code outside the domain.
-7. Keep changes within the requested v0.2 scope.
-
-Do not stop after scaffolding if the task asks for working functionality.
+Keep configuration access outside the domain layer.
 
 ---
 
-## API compatibility principle
+## Testing requirements
 
-When migrating the v0.1 frontend to the backend:
+Every implementation must preserve or improve existing tests.
 
-* preserve user-visible behavior
-* preserve game rules
-* preserve scoring behavior
-* preserve immediate feedback
-* preserve replay behavior
+At minimum validate:
 
-Architectural migration must not silently change product behavior.
+- game retrieval from repository,
+- game-not-found behavior,
+- session creation,
+- session retrieval,
+- answer/progress persistence,
+- score persistence,
+- session completion,
+- conditional update/conflict behavior,
+- mapping between DynamoDB records and domain models.
+
+Prefer unit tests for repository mapping and use cases.
+
+Do not require live AWS services for the entire test suite.
+
+Use dependency injection/fakes/mocks where appropriate.
 
 ---
 
-## Validation
+## Validation before completion
 
-Before completing a coding task, run:
+Before declaring v0.3 complete, run:
 
 ```bash
 npm run lint
 npm test
 npm run build
-```
-
-If infrastructure validation applies, also run:
-
-```bash
 npx cdk synth
 ```
 
-Fix errors introduced by the change.
+If the repository exposes additional relevant validation scripts, run them too.
 
-Do not leave known build, lint, test or CDK synthesis errors caused by the implementation.
+Do not claim completion while these commands fail.
+
+If a failure is pre-existing and unrelated, clearly report it.
 
 ---
 
-## Completion report
+## Implementation workflow for Codex / coding agents
 
-At the end of a task, summarize:
+When asked to implement v0.3:
 
-* files created
-* files modified
-* important implementation decisions
-* API routes created or changed
-* AWS resources created or changed
-* validation performed
-* functionality deliberately excluded to preserve v0.2 scope
+1. Read this `AGENTS.md`.
+2. Read the current architecture and ADRs.
+3. Inspect the existing code before proposing changes.
+4. Identify existing repository interfaces and composition roots.
+5. Preserve current domain/application boundaries.
+6. Implement infrastructure changes incrementally.
+7. Add/update tests together with code.
+8. Run validation commands.
+9. Summarize:
+   - files changed,
+   - architectural changes,
+   - tests executed,
+   - AWS resources introduced,
+   - any remaining manual deployment/seed steps.
+
+Do not stop after merely generating a plan when the request is to implement.
+
+Do not rewrite unrelated files for stylistic reasons.
+
+---
+
+## Preferred implementation order
+
+For v0.3, prefer this sequence:
+
+```text
+1. Inspect current repository contracts
+2. Add DynamoDB tables in CDK
+3. Add IAM permissions and Lambda environment variables
+4. Implement DynamoDbGameRepository
+5. Add game seed mechanism
+6. Wire DynamoDbGameRepository into AWS runtime
+7. Implement DynamoDbGameSessionRepository
+8. Add conditional session updates
+9. Wire session repository into AWS runtime
+10. Remove JSON/in-memory repositories from AWS runtime composition
+11. Update/add tests
+12. Validate complete HTTP flow
+13. npm run lint
+14. npm test
+15. npm run build
+16. npx cdk synth
+```
+
+JSON/in-memory implementations may remain for tests/local fixtures if still useful, but they must not remain the AWS runtime source of truth.
+
+---
+
+## Definition of Done — v0.3
+
+v0.3 is complete when:
+
+- games are loaded from DynamoDB at runtime,
+- game sessions are stored durably in DynamoDB,
+- session state survives Lambda container replacement,
+- concurrent/stale session updates are protected where required,
+- frontend continues using the existing API abstraction,
+- domain and application layers remain AWS-independent,
+- DynamoDB resources are defined through CDK,
+- Lambda has least-privilege access to required tables,
+- initial games can be seeded repeatably,
+- lint/tests/build/CDK synth succeed,
+- no v0.4+ feature has been introduced unnecessarily.
+
+---
+
+## Architectural rule of thumb
+
+When unsure where code belongs, use this dependency direction:
+
+```text
+UI
+ ↓
+HTTP Client
+ ↓
+API / Lambda Adapter
+ ↓
+Application
+ ↓
+Domain
+ ↑
+Repository Contract
+ ↑
+Infrastructure Implementation
+ ↑
+AWS SDK / DynamoDB
+```
+
+Dependencies should point toward the application/domain core, never the opposite.
+
+The goal of v0.3 is not to make the platform complex.
+
+The goal is:
+
+> **Keep the existing game playable, but make its backend state durable.**

@@ -1,6 +1,7 @@
 import gameData from "../../data/games.json" with { type: "json" };
 import type {
   Category,
+  Game,
   Player,
   Question,
 } from "../../domain/game/types.ts";
@@ -16,6 +17,20 @@ interface LocalGameData {
 const data = gameData as LocalGameData;
 
 export class MockGameRepository implements GameRepository {
+  async findAll(): Promise<Game[]> {
+    return data.categories.map((category) => ({
+      id: category.id,
+      title: category.name,
+      category,
+      players: [...data.players],
+      questions: data.questions.filter((question) => question.categoryId === category.id),
+    }));
+  }
+
+  async findById(id: string): Promise<Game | null> {
+    return (await this.findAll()).find((game) => game.id === id) ?? null;
+  }
+
   async getPlayers(): Promise<Player[]> {
     return [...data.players];
   }

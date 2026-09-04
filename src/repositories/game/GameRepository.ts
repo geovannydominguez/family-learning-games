@@ -3,6 +3,7 @@ import type {
   Difficulty,
   Player,
   Question,
+  Game,
 } from "../../domain/game/types.ts";
 
 export interface QuestionCriteria {
@@ -11,6 +12,8 @@ export interface QuestionCriteria {
 }
 
 export interface GameRepository {
+  findAll(): Promise<Game[]>;
+  findById(id: string): Promise<Game | null>;
   getPlayers(): Promise<Player[]>;
   getCategories(): Promise<Category[]>;
   getQuestions(criteria?: QuestionCriteria): Promise<Question[]>;

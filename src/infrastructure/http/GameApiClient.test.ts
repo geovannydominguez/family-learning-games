@@ -4,7 +4,7 @@ import test from "node:test";
 import { GameApiClient, GameApiError } from "./GameApiClient.ts";
 
 test("invokes an injected fetcher with the global receiver", async () => {
-  const receiverSensitiveFetcher: typeof fetch = async function (input, init) {
+  const receiverSensitiveFetcher: typeof fetch = async function (this: typeof globalThis, input, init) {
     if (this !== globalThis) {
       throw new TypeError("Illegal invocation");
     }

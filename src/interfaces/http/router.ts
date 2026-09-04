@@ -1,6 +1,6 @@
-import { ApplicationError } from "../../application/errors.ts";
+import { ApplicationError, PersistenceError } from "../../application/errors.ts";
 import type { GameSessionService } from "../../application/game/gameSessionService.ts";
-import type { Difficulty } from "../../domain/game/types.ts";
+import type { Difficulty, Game } from "../../domain/game/types.ts";
 import type { GameRepository } from "../../repositories/game/GameRepository.ts";
 import type { HttpRequest, HttpResponse, RequestLog } from "./contracts.ts";
 
@@ -23,11 +23,16 @@ export function createHttpRouter({
   return async (request: HttpRequest): Promise<HttpResponse> => {
     const startedAt = now();
     let response: HttpResponse;
+    let caughtError: unknown;
     try {
       response = await route(request, games, sessionService);
     } catch (error) {
+      caughtError = error;
       response = mapError(error);
     }
+    const errorDiagnostic = response.statusCode >= 500 && caughtError
+      ? buildSafeErrorDiagnostic(caughtError, request)
+      : undefined;
     log({
       level: response.statusCode >= 500 ? "error" : "info",
       timestamp: new Date().toISOString(),
@@ -36,12 +41,69 @@ export function createHttpRouter({
       path: request.path,
       statusCode: response.statusCode,
       durationMs: Math.max(0, now() - startedAt),
+      ...(errorDiagnostic ? { error: errorDiagnostic } : {}),
     });
     return response;
   };
 }
 
+function buildSafeErrorDiagnostic(error: unknown, request: HttpRequest): NonNullable<RequestLog["error"]> {
+  if (error instanceof PersistenceError) {
+    return {
+      category: "persistence",
+      name: error.originalErrorName,
+      operation: error.operation,
+      ...(error.resourceId ? { resourceId: error.resourceId } : {}),
+    };
+  }
+  const name = readSafeErrorName(error);
+  const routeContext = readRouteContext(request);
+  return {
+    category: "unexpected",
+    name,
+    operation: routeContext.operation,
+    ...(routeContext.resourceId ? { resourceId: routeContext.resourceId } : {}),
+  };
+}
+
+function readSafeErrorName(error: unknown): string {
+  if (!error || typeof error !== "object" || !("name" in error) || typeof error.name !== "string") return "UnknownError";
+  return /^[A-Za-z][A-Za-z0-9]{0,79}$/.test(error.name) ? error.name : "UnknownError";
+}
+
+function readRouteContext(request: HttpRequest): { operation: string; resourceId?: string } {
+  if (request.method === "GET" && request.path === "/games") return { operation: "list-games" };
+  if (request.method === "GET" && request.path === "/game-setup") return { operation: "get-game-setup" };
+  if (request.method === "POST" && request.path === "/game-sessions") return { operation: "start-game-session" };
+  const game = request.path.match(/^\/games\/([^/]+)$/);
+  if (request.method === "GET" && game) return withResource("get-game", game[1]);
+  const answer = request.path.match(/^\/game-sessions\/([^/]+)\/answers$/);
+  if (request.method === "POST" && answer) return withResource("submit-answer", answer[1]);
+  const session = request.path.match(/^\/game-sessions\/([^/]+)$/);
+  if (request.method === "GET" && session) return withResource("get-game-session", session[1]);
+  return { operation: "unknown-route" };
+}
+
+function withResource(operation: string, encodedId: string): { operation: string; resourceId?: string } {
+  try {
+    const resourceId = decodeURIComponent(encodedId);
+    return /^[A-Za-z0-9._~-]{1,128}$/.test(resourceId) ? { operation, resourceId } : { operation };
+  } catch {
+    return { operation };
+  }
+}
+
 async function route(request: HttpRequest, games: GameRepository, sessionService: GameSessionService): Promise<HttpResponse> {
+  if (request.method === "GET" && request.path === "/games") {
+    const catalog = await games.findAll();
+    return json(200, catalog.map(toPublicGame));
+  }
+  const gameRoute = request.path.match(/^\/games\/([^/]+)$/);
+  if (request.method === "GET" && gameRoute) {
+    const game = await games.findById(decodeURIComponent(gameRoute[1]));
+    if (!game) throw new ApplicationError("RESOURCE_NOT_FOUND", "Game was not found.");
+    return json(200, toPublicGame(game));
+  }
   if (request.method === "GET" && request.path === "/game-setup") {
     const [players, categories] = await Promise.all([games.getPlayers(), games.getCategories()]);
     return json(200, { players, categories, difficulties });
@@ -60,7 +122,29 @@ async function route(request: HttpRequest, games: GameRepository, sessionService
     const body = parseObject(request.body);
     return json(200, await sessionService.answer(decodeURIComponent(answerRoute[1]), readString(body, "answerId")));
   }
+  const sessionRoute = request.path.match(/^\/game-sessions\/([^/]+)$/);
+  if (request.method === "GET" && sessionRoute) {
+    return json(200, await sessionService.get(decodeURIComponent(sessionRoute[1])));
+  }
   return json(404, { error: { code: "RESOURCE_NOT_FOUND", message: "Route was not found." } });
+}
+
+function toPublicGame(game: Game) {
+  return {
+    id: game.id,
+    title: game.title,
+    category: game.category,
+    difficulties: difficulties.filter((difficulty) => game.questions.some((question) => question.difficulty === difficulty)),
+    questions: game.questions.map((question) => ({
+      id: question.id,
+      categoryId: question.categoryId,
+      difficulty: question.difficulty,
+      text: question.text,
+      emoji: question.emoji,
+      image: question.image,
+      answers: question.answers.map(({ id, text }) => ({ id, text })),
+    })),
+  };
 }
 
 function parseObject(body: string | null | undefined): Record<string, unknown> {
@@ -86,7 +170,7 @@ function readDifficulty(value: unknown): Difficulty {
 
 function mapError(error: unknown): HttpResponse {
   if (error instanceof ApplicationError) {
-    const status = error.code === "INVALID_REQUEST" ? 400 : error.code === "INVALID_SESSION_STATE" ? 409 : 404;
+    const status = error.code === "INVALID_REQUEST" ? 400 : error.code === "INVALID_SESSION_STATE" || error.code === "SESSION_CONFLICT" ? 409 : 404;
     return json(status, { error: { code: error.code, message: error.message } });
   }
   return json(500, { error: { code: "UNEXPECTED_ERROR", message: "An unexpected error occurred." } });

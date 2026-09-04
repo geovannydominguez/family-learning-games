@@ -60,6 +60,7 @@ export function createGameSession({
   random = Math.random,
 }: CreateGameSessionInput): GameSession {
   return {
+    revision: 0,
     player,
     category,
     difficulty,

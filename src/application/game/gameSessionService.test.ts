@@ -31,6 +31,16 @@ test("submits and advances in the backend while returning feedback", async () =>
   assert.equal(result.nextSession.currentQuestionIndex, 1);
   assert.equal(result.nextSession.score, 1);
   assert.ok(result.nextSession.currentQuestion?.answers.every((answer) => !("isCorrect" in answer)));
+  assert.deepEqual(await service.get(started.id), result.nextSession);
+});
+
+test("passes the loaded revision as the optimistic concurrency expectation", async () => {
+  const sessions = new InMemoryGameSessionRepository();
+  const service = new GameSessionService(new MockGameRepository(), sessions, () => "session-1", () => 0);
+  const started = await service.start({ playerId: "amelia", categoryId: "animals", difficulty: "easy" });
+  const first = await sessions.findById(started.id);
+  await service.answer(started.id, first!.questions[0].answers[0].id);
+  await assert.rejects(sessions.update(started.id, { ...first!, revision: 1 }, 0), (error: unknown) => error instanceof ApplicationError && error.code === "SESSION_CONFLICT");
 });
 
 test("returns explicit application errors for unknown selections, sessions and invalid answers", async () => {

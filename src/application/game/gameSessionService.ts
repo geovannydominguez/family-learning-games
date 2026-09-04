@@ -36,16 +36,13 @@ export class GameSessionService {
       throw new ApplicationError("INVALID_REQUEST", "Player, category and difficulty are required.");
     }
 
-    const [players, categories, questions] = await Promise.all([
-      this.games.getPlayers(),
-      this.games.getCategories(),
-      this.games.getQuestions({ categoryId: command.categoryId, difficulty: command.difficulty }),
-    ]);
-    const player = players.find((candidate) => candidate.id === command.playerId);
-    const category = categories.find((candidate) => candidate.id === command.categoryId);
-    if (!player || !category) {
+    const game = await this.games.findById(command.categoryId);
+    const player = game?.players.find((candidate) => candidate.id === command.playerId);
+    if (!game || !player) {
       throw new ApplicationError("RESOURCE_NOT_FOUND", "Player or category was not found.");
     }
+    const category = game.category;
+    const questions = game.questions.filter((question) => question.difficulty === command.difficulty);
 
     let session: GameSession;
     try {
@@ -54,7 +51,7 @@ export class GameSessionService {
       throw new ApplicationError("INVALID_SESSION_STATE", "There is not enough content to start this game.");
     }
     const id = this.createId();
-    await this.sessions.save(id, session);
+    await this.sessions.create(id, session);
     return toPublicSession(id, session);
   }
 
@@ -71,8 +68,9 @@ export class GameSessionService {
     const correctAnswer = question.answers.find((candidate) => candidate.isCorrect);
     if (!correctAnswer) throw new ApplicationError("INVALID_SESSION_STATE", "The current question is invalid.");
 
-    const nextSession = advanceSession(submitAnswer(session, answerId));
-    await this.sessions.save(sessionId, nextSession);
+    const expectedRevision = session.revision;
+    const nextSession = { ...advanceSession(submitAnswer(session, answerId)), revision: expectedRevision + 1 };
+    await this.sessions.update(sessionId, nextSession, expectedRevision);
     return {
       feedback: {
         selectedAnswerId: answer.id,
@@ -82,6 +80,12 @@ export class GameSessionService {
       },
       nextSession: toPublicSession(sessionId, nextSession),
     };
+  }
+
+  async get(sessionId: string): Promise<PublicGameSession> {
+    const session = await this.sessions.findById(sessionId);
+    if (!session) throw new ApplicationError("SESSION_NOT_FOUND", "Game session was not found or has expired.");
+    return toPublicSession(sessionId, session);
   }
 }
 
