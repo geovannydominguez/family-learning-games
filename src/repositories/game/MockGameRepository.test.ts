@@ -14,6 +14,15 @@ test("the local dataset supports every v0.1 game combination", async () => {
     ["Amelia", "Joaquín", "Papá", "Mamá"],
   );
   assert.deepEqual(
+    players.map(({ id, age }) => ({ id, age })),
+    [
+      { id: "amelia", age: 4 },
+      { id: "joaquin", age: 6 },
+      { id: "papa", age: 18 },
+      { id: "mama", age: 18 },
+    ],
+  );
+  assert.deepEqual(
     categories.map((category) => category.id),
     ["animals", "space", "numbers"],
   );
@@ -54,4 +63,34 @@ test("the local dataset supports every v0.1 game combination", async () => {
       }
     }
   }
+});
+
+test("conditionally adds generated games while keeping categories unique", async () => {
+  const repository = new MockGameRepository();
+  const existing = await repository.findById("animals");
+  assert.ok(existing);
+  await repository.create({ ...existing, id: "ai-animals-1", title: "Generated animals" });
+
+  assert.equal((await repository.findById("ai-animals-1"))?.title, "Generated animals");
+  assert.deepEqual((await repository.getCategories()).map((category) => category.id), ["animals", "space", "numbers"]);
+  assert.equal((await repository.getQuestions({ categoryId: "animals", difficulty: "easy" })).length, 20);
+  await assert.rejects(repository.create({ ...existing, id: "ai-animals-1" }), /already exists/i);
+});
+
+test("keeps generated-only categories and players out of legacy setup choices", async () => {
+  const repository = new MockGameRepository();
+  const existing = await repository.findById("animals");
+  assert.ok(existing);
+  await repository.create({
+    ...existing,
+    id: "ai-volcanoes-1",
+    category: { id: "volcanoes", name: "Volcanoes", description: "Learn", icon: "🌋" },
+    players: [{ id: "generated-player", name: "Generated", avatar: "G", age: 8 }],
+    questions: existing.questions.map((question) => ({ ...question, categoryId: "volcanoes" })),
+  });
+
+  assert.deepEqual((await repository.getCategories()).map(({ id }) => id), ["animals", "space", "numbers"]);
+  assert.equal((await repository.getPlayers()).some(({ id }) => id === "generated-player"), false);
+  assert.equal((await repository.findAll()).some(({ id }) => id === "ai-volcanoes-1"), true);
+  assert.equal((await repository.findById("ai-volcanoes-1"))?.category.id, "volcanoes");
 });

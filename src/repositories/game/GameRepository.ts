@@ -12,6 +12,7 @@ export interface QuestionCriteria {
 }
 
 export interface GameRepository {
+  create(game: Game): Promise<void>;
   findAll(): Promise<Game[]>;
   findById(id: string): Promise<Game | null>;
   getPlayers(): Promise<Player[]>;

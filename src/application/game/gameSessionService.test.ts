@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { MockGameRepository } from "../../repositories/game/MockGameRepository.ts";
+import type { Game } from "../../domain/game/types.ts";
 import { InMemoryGameSessionRepository } from "../../infrastructure/repositories/InMemoryGameSessionRepository.ts";
 import { ApplicationError } from "../errors.ts";
 import { GameSessionService } from "./gameSessionService.ts";
@@ -15,6 +16,37 @@ test("starts a ten-question session without exposing correct answers", async () 
   assert.equal(session.currentQuestionIndex, 0);
   assert.equal(session.currentQuestion?.answers.length, 4);
   assert.ok(session.currentQuestion?.answers.every((answer) => !("isCorrect" in answer)));
+});
+
+test("selects an exact gameId, persists it, and rejects a mismatched category", async () => {
+  const games = new MockGameRepository();
+  const base = await games.findById("animals");
+  assert.ok(base);
+  const generated: Game = {
+    ...base,
+    id: "ai-animals-1",
+    title: "Generated animals",
+  };
+  await games.create(generated);
+  const sessions = new InMemoryGameSessionRepository();
+  const service = new GameSessionService(games, sessions, () => "session-ai", () => 0);
+
+  const started = await service.start({
+    playerId: "amelia",
+    categoryId: "animals",
+    gameId: generated.id,
+    difficulty: "easy",
+  });
+
+  assert.equal((await sessions.findById(started.id))?.gameId, generated.id);
+  await assert.rejects(
+    service.start({ playerId: "amelia", categoryId: "space", gameId: generated.id, difficulty: "easy" }),
+    (error: unknown) => error instanceof ApplicationError && error.code === "INVALID_REQUEST",
+  );
+  await assert.rejects(
+    service.start({ playerId: "amelia", categoryId: "animals", gameId: "   ", difficulty: "easy" }),
+    (error: unknown) => error instanceof ApplicationError && error.code === "INVALID_REQUEST",
+  );
 });
 
 test("submits and advances in the backend while returning feedback", async () => {

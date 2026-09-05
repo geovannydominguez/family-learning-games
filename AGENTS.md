@@ -1,604 +1,318 @@
 # Family Learning Games — AGENTS.md
 
-## Project
+## Current target
+> **v0.4 — AI Game Generation**
 
-Family Learning Games is an incremental family-oriented learning game platform.
+## Current roadmap phase
+> **FASE 4 — Generación de juegos con IA**
 
-The project must evolve progressively, preserving architectural clarity and avoiding unnecessary complexity.
-
-Current target version:
-
-> **v0.3 — Durable Persistence**
-
-Current roadmap phase:
-
-> **FASE 3 — Persistencia**
-
----
-
-## Mandatory documentation to read first
-
-Before changing code, read and follow these files:
+## Mandatory documentation
+Before modifying code, read:
 
 1. `AGENTS.md`
-2. `docs/architecture/ARCHITECTURE-v0.3.md`
-3. `docs/architecture/ADR-006-dynamodb-persistence.md`
-4. `docs/architecture/ADR-007-dynamodb-data-model.md`
-5. `docs/architecture/REQUIREMENTS-v0.3.md`
+2. `docs/architecture/ARCHITECTURE-v0.4.md`
+3. `docs/architecture/ADR-008-amazon-bedrock-game-generator.md`
+4. `docs/architecture/ADR-009-ai-game-validation-and-identity.md`
+5. `docs/architecture/REQUIREMENTS-v0.4.md`
 
-Also review previous architecture decisions when relevant:
+Previous accepted architecture/ADRs remain relevant unless superseded.
 
-- `docs/architecture/ARCHITECTURE-v0.1.md`
-- `docs/architecture/ARCHITECTURE-v0.2.md`
-- `docs/architecture/ADR-001.md`
-- `docs/architecture/ADR-002.md`
-- `docs/architecture/ADR-003-serverless-backend.md`
-- `docs/architecture/ADR-004-api-gateway-http-api.md`
-- `docs/architecture/ADR-005-aws-cdk.md`
-
-If requirements conflict, prefer the most recent accepted architecture/ADR for the current version.
-
-Do not silently reinterpret architectural decisions.
-
----
-
-## Current architecture
-
-The target architecture for v0.3 is:
+## Architecture
 
 ```text
 Next.js
-   │
-   ▼
+   ↓
 GameApiClient
-   │
-   ▼
+   ↓
 API Gateway HTTP API
-   │
-   ▼
+   ↓
 AWS Lambda
-   │
-   ▼
-Application / Domain
-   │
-   ▼
-Repository Contracts
-   │
-   ├──────────────────────────────┐
-   ▼                              ▼
-DynamoDbGameRepository     DynamoDbGameSessionRepository
-   │                              │
-   └──────────────┬───────────────┘
-                  ▼
-               DynamoDB
-```
-
-The main architectural change from v0.2 to v0.3 is:
-
-> Replace runtime JSON/in-memory persistence with DynamoDB while preserving the existing domain/application boundaries and repository abstractions.
-
----
-
-## Core engineering principles
-
-These rules are mandatory.
-
-### 1. Keep Domain AWS-independent
-
-The domain layer must not depend on:
-
-- AWS SDK
-- DynamoDB types
-- API Gateway event types
-- Lambda runtime types
-- CDK constructs
-- environment variables
-
-The domain must remain plain TypeScript.
-
-### 2. Keep Application independent from infrastructure
-
-Application/use-case code must depend on repository interfaces/contracts, not concrete DynamoDB implementations.
-
-Correct:
-
-```text
+   ↓
 Application
+   ├── GameGenerator ──► BedrockGameGenerator ──► Amazon Bedrock
+   └── Repository ports ──► DynamoDB repositories ──► DynamoDB
    ↓
-GameRepository
-   ↓
-DynamoDbGameRepository
+Domain
 ```
 
-Incorrect:
+## Mandatory rules
 
-```text
-Application
-   ↓
-DynamoDBDocumentClient
-```
+### Domain is AWS-independent
+No AWS SDK, Bedrock, Lambda, API Gateway, DynamoDB, or CDK imports in Domain.
 
-### 3. Infrastructure implements repository contracts
+### Application is provider-independent
+Application depends on `GameGenerator`, never directly on Bedrock SDK types.
 
-AWS-specific implementation belongs in infrastructure.
+### AI is Infrastructure
+Bedrock request construction, provider prompts, model configuration, and response parsing belong in Infrastructure.
 
-Examples:
+### Never trust model output
+AI-produced data is untrusted. Validate deeply before persistence.
 
-```text
-src/infrastructure/
-├── persistence/
-│   ├── DynamoDbGameRepository.ts
-│   └── DynamoDbGameSessionRepository.ts
-└── http/
-```
+### One game domain
+Seeded and generated games use the same `Game` and `GameSession`.
 
-Exact placement may follow the existing repository structure, but do not move unrelated code without a clear reason.
+## Identity rule
+`gameId = categoryId` is no longer a domain invariant.
 
-### 4. Preserve incremental architecture
+Existing seeded IDs remain valid. Generated games use unique IDs created by Application through an injected ID factory. Persistence must use a conditional create and translate collisions without overwriting an existing game.
 
-Do not redesign the complete project.
+`POST /game-sessions` accepts an optional `gameId`. When present, `gameId` selects the game and its category must match `categoryId`; when absent, lookup falls back to `categoryId` exactly as in v0.3. Generated-game UI flows must send `gameId`. This is an additive, backward-compatible request change.
 
-Do not introduce abstractions because they might be useful someday.
+## Generation rules
+Generation must:
+- happen only on explicit request
+- accept a topic of at most 80 characters
+- use supported difficulty
+- require exactly 10 questions
+- produce exactly 4 answers per question
+- limit titles to 100 characters, questions to 240 characters, and answers to 120 characters
+- be family/child appropriate
+- produce exactly one correct answer per question
+- pass structural and domain validation
+- use bounded retries only
+- return public DTOs without correct answers
 
-Implement only what v0.3 requires.
-
-Prefer:
-
-```text
-small change
-→ tested
-→ understandable
-→ deployable
-```
-
-over:
-
-```text
-large future-proof redesign
-```
-
-### 5. Repository contracts remain the persistence boundary
-
-The existing repository interfaces are intentional architectural boundaries.
-
-Prefer adapting concrete implementations rather than changing domain/application APIs.
-
-Change a repository contract only when the current contract cannot correctly express a v0.3 requirement.
-
-If changing a contract is necessary:
-
-1. explain why,
-2. keep the change minimal,
-3. update tests,
-4. preserve separation of concerns.
-
----
-
-## v0.3 persistence decisions
-
-### DynamoDB is the persistence technology
-
-Use Amazon DynamoDB for durable persistence.
-
-Do not replace it with:
-
-- RDS
-- PostgreSQL
-- Aurora
-- MongoDB
-- Redis
-- S3-as-database
-
-unless an accepted ADR explicitly changes this decision.
-
-### Tables
-
-v0.3 should remain simple.
-
-Use two logical persistence models:
-
-```text
-Games
-└── PK: gameId
-
-GameSessions
-└── PK: sessionId
-```
-
-Do not introduce a complex single-table design in v0.3.
-
-Do not add secondary indexes unless an actual current access pattern requires them.
-
-### Game persistence
-
-A game may be stored as a single DynamoDB item containing its questions.
-
-Conceptually:
-
-```text
-Game
-├── gameId
-├── title
-├── category
-├── difficulty
-└── questions[]
-```
-
-Do not normalize questions/options into additional tables without a current requirement.
-
-### Session persistence
-
-Game sessions must survive Lambda container replacement/restart.
-
-Do not use in-memory state as the runtime source of truth.
-
-Session state stored in DynamoDB should support the current game flow, including:
-
-- session identification,
-- selected game,
-- current question/progress,
-- score,
-- answers or state required by the existing use cases,
-- completion state,
-- concurrency/version information when needed.
-
-Reuse existing domain models where practical.
-
-Do not expose DynamoDB storage structures directly to the domain.
-
----
-
-## Concurrency and idempotency
-
-Persistence introduces concurrency concerns.
-
-Session updates must not rely only on:
-
-```text
-read
-→ modify
-→ unconditional save
-```
-
-when concurrent requests could corrupt progress.
-
-Use DynamoDB conditional writes / optimistic concurrency where required.
-
-For example, an answer request should not be able to advance the same expected question twice.
-
-Conceptually:
-
-```text
-expected currentQuestionIndex == persisted currentQuestionIndex
-```
-
-If the condition fails:
-
-- return an application-level conflict/error,
-- do not leak DynamoDB implementation details,
-- do not silently overwrite the latest session state.
-
-HTTP mapping may use `409 Conflict` when consistent with the existing API error model.
-
----
-
-## Seed data
-
-The current local JSON game data may remain in the repository as:
-
-- fixture,
-- seed input,
-- development data.
-
-But JSON must no longer be the runtime persistence source for the AWS backend.
-
-Provide a simple repeatable seed mechanism for development.
-
-Preferred concept:
-
-```text
-existing JSON
-    ↓
-seed script
-    ↓
-DynamoDB Games table
-```
-
-The seed mechanism should be safe to rerun when practical.
-
-Do not build an admin UI for game management in v0.3.
-
----
-
-## AWS CDK rules
-
-Infrastructure remains managed with AWS CDK using TypeScript.
-
-v0.3 CDK changes should include only what is necessary, such as:
-
-- DynamoDB tables,
-- Lambda environment variables containing table names,
-- IAM permissions required by Lambda,
-- outputs when useful.
-
-Prefer least-privilege IAM.
-
-Do not grant broad permissions such as:
-
-```text
-dynamodb:*
-Resource: *
-```
-
-when table-scoped permissions can be used.
-
----
-
-## Development environment and cost control
-
-This is still a development-stage personal project.
-
-Prefer DynamoDB on-demand billing for v0.3 unless an accepted ADR says otherwise.
-
-Development resources should remain easy to destroy and recreate.
-
-For disposable development tables, destructive removal behavior is acceptable when explicitly configured for the development stack.
-
-Do not assume production retention policies yet.
-
-Do not add unnecessary always-on AWS resources.
-
----
-
-## Allowed changes in v0.3
-
-The following are in scope:
-
-- DynamoDB tables
-- AWS SDK DynamoDB client usage inside infrastructure
-- DynamoDB repository implementations
-- repository wiring/composition changes
-- Lambda IAM permissions for DynamoDB
-- Lambda environment configuration for table names
-- seed script for initial games
-- persistence mapping code
-- conditional writes / optimistic concurrency
-- unit tests
-- infrastructure tests where useful
-- updates needed to preserve the existing API behavior
-- small refactors necessary to support durable persistence
-
----
-
-## Explicitly out of scope for v0.3
-
-Do not introduce:
-
-- Amazon Cognito
-- user authentication
-- family accounts
-- family profiles
-- child profiles
-- AI-generated games
-- Amazon Bedrock
-- OpenAI integration
-- SQS
-- SNS
-- EventBridge
-- Step Functions
-- WebSockets
-- multiplayer
-- leaderboards
-- analytics pipelines
-- Redis / ElastiCache
-- RDS / Aurora
-- GraphQL / AppSync
-- S3 persistence for game/session records
-- admin portal
-- mobile native app
-- PWA-specific features
-- audio/image generation
-- production-grade multi-environment platform redesign
-
-These belong to later roadmap phases unless explicitly requested and approved.
-
----
-
-## API compatibility
-
-The frontend should continue consuming the backend through `GameApiClient`.
-
-Do not make React components call DynamoDB or AWS SDKs directly.
-
-Preserve the existing HTTP API contract whenever possible.
-
-A persistence implementation change should not require unnecessary frontend rewrites.
-
-If an API contract must change, make it explicit and keep it minimal.
-
----
-
-## Error handling
-
-Translate infrastructure errors into application/API errors.
-
-Do not leak:
-
-- DynamoDB exception names,
-- AWS request IDs,
-- table internals,
-- stack traces,
-- AWS SDK objects
-
-to clients.
-
-Expected error classes should remain meaningful at the application/API level.
-
-Examples:
-
-```text
-GAME_NOT_FOUND
-SESSION_NOT_FOUND
-INVALID_ANSWER
-SESSION_CONFLICT
-MISSING_CONFIGURATION
-```
-
-Reuse existing conventions where they already exist.
-
----
+Do not send family names, profiles, secrets, or unrelated personal data to the model.
 
 ## Configuration
+Do not hardcode models in Domain/Application.
 
-Do not hardcode DynamoDB table names inside repository code.
+Use configuration such as:
 
-Read them from environment/configuration supplied by infrastructure.
+```text
+AI_GAME_GENERATION_ENABLED
+BEDROCK_MODEL_ID
+BEDROCK_REGION
+BEDROCK_GUARDRAIL_ID
+BEDROCK_GUARDRAIL_VERSION
+```
 
-Fail fast with a clear configuration error if required configuration is missing.
+AI generation defaults to disabled. Bedrock model, region, and Guardrail configuration are required only when it is enabled. CDK provisions the basic configurable Guardrail and passes only its ID/version to Infrastructure; Domain and Application remain unaware of it.
 
-Keep configuration access outside the domain layer.
+## Persistence
+Use the existing `Games` table. Do not create a separate AI games table.
 
----
+Persist only accepted games.
 
-## Testing requirements
+Do not persist raw model reasoning or unnecessary raw provider responses.
 
-Every implementation must preserve or improve existing tests.
+## Allowed in v0.4
+- Amazon Bedrock SDK in Infrastructure
+- `GameGenerator`
+- `BedrockGameGenerator`
+- generation use case
+- strict parsing/validation
+- unique generated IDs
+- `POST /games/generate`
+- minimal frontend flow for explicit generation
+- Bedrock IAM/config
+- tests/fakes/mocks
+- bounded retry
 
-At minimum validate:
+## Out of scope
+Do not add:
+- Cognito/auth
+- family/child profiles
+- stored personalization
+- RAG/embeddings/vector DB
+- chat
+- image/audio generation
+- SQS/SNS/EventBridge/Step Functions
+- WebSockets/multiplayer
+- leaderboards/recommendations
+- RDS/Redis/AppSync
+- admin UI
+- model fine-tuning
+- production-scale redesign
 
-- game retrieval from repository,
-- game-not-found behavior,
-- session creation,
-- session retrieval,
-- answer/progress persistence,
-- score persistence,
-- session completion,
-- conditional update/conflict behavior,
-- mapping between DynamoDB records and domain models.
+## API compatibility
+Do not remove or rename:
 
-Prefer unit tests for repository mapping and use cases.
+```text
+GET  /game-setup
+GET  /games
+GET  /games/{gameId}
+POST /game-sessions
+GET  /game-sessions/{sessionId}
+POST /game-sessions/{sessionId}/answers
+```
 
-Do not require live AWS services for the entire test suite.
+Add:
 
-Use dependency injection/fakes/mocks where appropriate.
+```text
+POST /games/generate
+```
 
----
+The session request may add optional `gameId` without removing or changing the existing fields.
 
-## Validation before completion
+`answers[].isCorrect` must never be public.
 
-Before declaring v0.3 complete, run:
+## Error handling
+Map provider failures to application errors such as:
+
+```text
+INVALID_GENERATION_REQUEST
+AI_GENERATION_DISABLED
+AI_GENERATION_FAILED
+AI_GENERATED_CONTENT_INVALID
+```
+
+Never expose Bedrock exception names, raw responses, prompt internals, AWS request IDs, or stack traces.
+Guardrail interventions map to a safe application error. API Gateway throttling returns HTTP `429`; the frontend must show a retry-later state and must not retry aggressively.
+
+## Content validation
+At minimum:
+- title/category
+- exactly 10 questions
+- supported difficulty
+- non-empty question/answer text
+- exactly 4 answers per question
+- exactly one correct answer
+- unique question IDs
+- unique answer IDs per question
+- consistent category
+- title <= 100, question <= 240, and answer <= 120 characters
+
+Do not rely on shallow `Array.isArray()` checks for model output.
+
+## Cost and latency
+Generation is synchronous in v0.4.
+
+No generation on page load.
+No automatic background generation.
+No unbounded retries.
+Limit model output to 4096 tokens and the Lambda execution budget to 28 seconds.
+
+Throttle only `POST /games/generate`, defaulting to 1 request/second with burst 2. Keep both limits configurable in CDK; do not apply them to existing gameplay routes.
+
+Only propose async architecture after real latency evidence.
+
+## IAM
+Grant least privilege for Bedrock model invocation and Guardrail application, and preserve DynamoDB least privilege.
+
+## Testing
+Normal tests must not require live Bedrock.
+
+Use fake/mock `GameGenerator`.
+
+Test Application, provider mapping/parsing, invalid output, HTTP behavior, public DTO protection, persistence, and CDK IAM/config.
+
+## Workflow for coding agents
+
+1. Read docs.
+2. Inspect current v0.3 code.
+3. Preserve boundaries.
+4. Add `GameGenerator`.
+5. Add generation use case.
+6. Add deterministic validation.
+7. Add Bedrock adapter.
+8. Persist accepted game.
+9. Add API route.
+10. Add minimal frontend flow if required.
+11. Add CDK IAM/config.
+12. Add tests.
+13. Run the standard project validations defined below.
+14. Summarize changed files, AWS delta, test results, and manual deployment steps.
+
+Do not stop because the total change exceeds an arbitrary line limit. If a patch limit exists, use multiple coherent edits on the same branch.
+
+Do not create branch chains unless explicitly requested.
+
+Do not run Gentle AI, 4R, Judgment Day, or any Gentle AI-dependent review as part of the normal workflow unless the user explicitly requests that specific review for the current task.
+
+## Gentle AI policy
+
+`gentle-ai` is optional for this project and is **opt-in only**.
+
+Do **not** execute any `gentle-ai` command unless the user explicitly requests Gentle AI in the current task.
+
+This includes, but is not limited to:
+
+- `gentle-ai review`
+- `gentle-ai review finalize`
+- 4R reviews
+- Judgment Day / dual adversarial review
+- automated Gentle AI reviewers
+- Gentle AI PR workflows
+- Gentle AI issue workflows
+- `gentle-ai skill-registry refresh`
+- any subagent, skill, hook, or workflow whose execution invokes `gentle-ai`
+
+The presence of any of the following does **not** constitute authorization to execute Gentle AI:
+
+- `.atl/skill-registry.md`
+- Gentle AI skills under `~/.config/opencode/skills`
+- Gentle AI skills under `~/.codex/skills`
+- a `gentle-ai` binary installed in the environment
+- previously generated Gentle AI review state or receipts
+- a previous `escalated`, `inconclusive`, or failed Gentle AI review
+
+Default project validation is the standard validation section below.
+
+Gentle AI may be used only when the user explicitly says something equivalent to:
+
+- "run gentle-ai"
+- "run the 4R review"
+- "use judgment-day"
+- "perform a Gentle AI review"
+
+Do **not** infer Gentle AI authorization from generic instructions such as:
+
+- review
+- validate
+- check
+- verify
+- inspect
+- test
+- audit
+
+unless Gentle AI or a specific Gentle AI workflow is explicitly named.
+
+A Gentle AI failure, escalation, receipt, or previous review state must **not** block normal project work, validation, commit preparation, or completion reporting unless the user explicitly required Gentle AI as a gate for the current task.
+
+Do not edit, override, fabricate, or manually approve Gentle AI receipts or review state.
+
+## Skill selection policy
+
+Skills may be discovered and read when relevant, but a skill must not be loaded or executed if its required workflow invokes `gentle-ai`, unless the user explicitly authorized Gentle AI for the current task.
+
+If a matching skill depends on Gentle AI and Gentle AI was not explicitly authorized:
+
+- skip that skill;
+- continue using the project instructions in `AGENTS.md` and the mandatory architecture documentation;
+- report `skill_resolution: skipped_gentle_ai` when skill resolution is part of the agent's output;
+- do not treat the skipped skill as a blocker;
+- do not replace it with another Gentle AI workflow.
+
+The skill registry is an index only. Its existence does not override this policy.
+
+## Validation
 
 ```bash
 npm run lint
+npx tsc --noEmit
 npm test
 npm run build
 npx cdk synth
+git diff --check
 ```
 
-If the repository exposes additional relevant validation scripts, run them too.
+## Definition of Done
+v0.4 is complete when:
+- explicit API request generates a game
+- Application uses provider-neutral `GameGenerator`
+- Bedrock exists only in Infrastructure
+- generated output is deeply validated
+- invalid output is never persisted
+- generated game IDs are independent from category IDs
+- seeded games still work
+- generated games persist in `Games`
+- correct answers remain private
+- generated games work with the current session flow
+- IAM/config are defined in CDK
+- local tests do not require live AI
+- validation commands pass
+- no later-phase features are introduced
 
-Do not claim completion while these commands fail.
-
-If a failure is pre-existing and unrelated, clearly report it.
-
----
-
-## Implementation workflow for Codex / coding agents
-
-When asked to implement v0.3:
-
-1. Read this `AGENTS.md`.
-2. Read the current architecture and ADRs.
-3. Inspect the existing code before proposing changes.
-4. Identify existing repository interfaces and composition roots.
-5. Preserve current domain/application boundaries.
-6. Implement infrastructure changes incrementally.
-7. Add/update tests together with code.
-8. Run validation commands.
-9. Summarize:
-   - files changed,
-   - architectural changes,
-   - tests executed,
-   - AWS resources introduced,
-   - any remaining manual deployment/seed steps.
-
-Do not stop after merely generating a plan when the request is to implement.
-
-Do not rewrite unrelated files for stylistic reasons.
-
----
-
-## Preferred implementation order
-
-For v0.3, prefer this sequence:
-
-```text
-1. Inspect current repository contracts
-2. Add DynamoDB tables in CDK
-3. Add IAM permissions and Lambda environment variables
-4. Implement DynamoDbGameRepository
-5. Add game seed mechanism
-6. Wire DynamoDbGameRepository into AWS runtime
-7. Implement DynamoDbGameSessionRepository
-8. Add conditional session updates
-9. Wire session repository into AWS runtime
-10. Remove JSON/in-memory repositories from AWS runtime composition
-11. Update/add tests
-12. Validate complete HTTP flow
-13. npm run lint
-14. npm test
-15. npm run build
-16. npx cdk synth
-```
-
-JSON/in-memory implementations may remain for tests/local fixtures if still useful, but they must not remain the AWS runtime source of truth.
-
----
-
-## Definition of Done — v0.3
-
-v0.3 is complete when:
-
-- games are loaded from DynamoDB at runtime,
-- game sessions are stored durably in DynamoDB,
-- session state survives Lambda container replacement,
-- concurrent/stale session updates are protected where required,
-- frontend continues using the existing API abstraction,
-- domain and application layers remain AWS-independent,
-- DynamoDB resources are defined through CDK,
-- Lambda has least-privilege access to required tables,
-- initial games can be seeded repeatably,
-- lint/tests/build/CDK synth succeed,
-- no v0.4+ feature has been introduced unnecessarily.
-
----
-
-## Architectural rule of thumb
-
-When unsure where code belongs, use this dependency direction:
-
-```text
-UI
- ↓
-HTTP Client
- ↓
-API / Lambda Adapter
- ↓
-Application
- ↓
-Domain
- ↑
-Repository Contract
- ↑
-Infrastructure Implementation
- ↑
-AWS SDK / DynamoDB
-```
-
-Dependencies should point toward the application/domain core, never the opposite.
-
-The goal of v0.3 is not to make the platform complex.
-
-The goal is:
-
-> **Keep the existing game playable, but make its backend state durable.**
+> **AI generates candidates; the application decides what becomes a game.**

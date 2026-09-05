@@ -32,11 +32,19 @@ export class GameSessionService {
   }
 
   async start(command: StartGameSessionCommand): Promise<PublicGameSession> {
-    if (!command.playerId || !command.categoryId || !difficulties.includes(command.difficulty)) {
+    if (
+      !command.playerId
+      || !command.categoryId
+      || (command.gameId !== undefined && command.gameId.trim() === "")
+      || !difficulties.includes(command.difficulty)
+    ) {
       throw new ApplicationError("INVALID_REQUEST", "Player, category and difficulty are required.");
     }
 
-    const game = await this.games.findById(command.categoryId);
+    const game = await this.games.findById(command.gameId ?? command.categoryId);
+    if (game && game.category.id !== command.categoryId) {
+      throw new ApplicationError("INVALID_REQUEST", "Game and category must match.");
+    }
     const player = game?.players.find((candidate) => candidate.id === command.playerId);
     if (!game || !player) {
       throw new ApplicationError("RESOURCE_NOT_FOUND", "Player or category was not found.");
@@ -46,7 +54,7 @@ export class GameSessionService {
 
     let session: GameSession;
     try {
-      session = createGameSession({ player, category, difficulty: command.difficulty, questions, random: this.random });
+      session = createGameSession({ gameId: game.id, player, category, difficulty: command.difficulty, questions, random: this.random });
     } catch {
       throw new ApplicationError("INVALID_SESSION_STATE", "There is not enough content to start this game.");
     }

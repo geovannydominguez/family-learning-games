@@ -38,13 +38,57 @@ test("normalizes the base URL and sends the expected methods and bodies", async 
     requests.push({ input: String(input), init });
     return new Response(JSON.stringify({ id: "s" }), { status: 201, headers: { "content-type": "application/json" } });
   };
-  await new GameApiClient("https://api.example.com", startFetcher).startSession({ playerId: "p", categoryId: "c", difficulty: "easy" });
+  await new GameApiClient("https://api.example.com", startFetcher).startSession({ playerId: "p", categoryId: "c", gameId: "ai-c-1", difficulty: "easy" });
   assert.equal(requests[1].init?.method, "POST");
-  assert.deepEqual(JSON.parse(String(requests[1].init?.body)), { playerId: "p", categoryId: "c", difficulty: "easy" });
+  assert.deepEqual(JSON.parse(String(requests[1].init?.body)), { playerId: "p", categoryId: "c", gameId: "ai-c-1", difficulty: "easy" });
+
+  await new GameApiClient("https://api.example.com", startFetcher).startSession({ playerId: "p", categoryId: "c", difficulty: "easy" });
+  assert.deepEqual(JSON.parse(String(requests[2].init?.body)), { playerId: "p", categoryId: "c", difficulty: "easy" });
 
   await new GameApiClient("https://api.example.com/", startFetcher).answerSession("session/id", "answer-1");
-  assert.equal(requests[2].input, "https://api.example.com/game-sessions/session%2Fid/answers");
-  assert.deepEqual(JSON.parse(String(requests[2].init?.body)), { answerId: "answer-1" });
+  assert.equal(requests[3].input, "https://api.example.com/game-sessions/session%2Fid/answers");
+  assert.deepEqual(JSON.parse(String(requests[3].init?.body)), { answerId: "answer-1" });
+});
+
+test("generates games and surfaces throttling without automatic retry", async () => {
+  let calls = 0;
+  const success = new GameApiClient("https://api.example.com", async (input, init) => {
+    calls += 1;
+    assert.equal(String(input), "https://api.example.com/games/generate");
+    assert.equal(init?.method, "POST");
+    assert.deepEqual(JSON.parse(String(init?.body)), { topic: "animals", difficulty: "easy", questionCount: 10, playerId: "amelia" });
+    return new Response(JSON.stringify({ id: "ai-animals-1", questions: [] }), { status: 201 });
+  });
+  assert.equal((await success.generateGame({ topic: "animals", difficulty: "easy", questionCount: 10, playerId: "amelia" })).id, "ai-animals-1");
+
+  const throttled = new GameApiClient("https://api.example.com", async () => {
+    calls += 1;
+    return new Response(JSON.stringify({}), { status: 429 });
+  });
+  await assert.rejects(
+    throttled.generateGame({ topic: "animals", difficulty: "easy", questionCount: 10, playerId: "amelia" }),
+    (error: unknown) => error instanceof GameApiError
+      && error.code === "RATE_LIMITED"
+      && error.status === 429
+      && error.message === "Too many generation requests. Try again later.",
+  );
+  assert.equal(calls, 2);
+});
+
+test("maps a non-JSON 429 response without retrying", async () => {
+  let calls = 0;
+  const client = new GameApiClient("https://api.example.com", async () => {
+    calls += 1;
+    return new Response("Too Many Requests", { status: 429 });
+  });
+
+  await assert.rejects(
+    client.generateGame({ topic: "animals", difficulty: "easy", questionCount: 10, playerId: "amelia" }),
+    (error: unknown) => error instanceof GameApiError
+      && error.code === "RATE_LIMITED"
+      && error.status === 429,
+  );
+  assert.equal(calls, 1);
 });
 
 test("requires a configured URL and translates API, network and invalid JSON failures", async () => {

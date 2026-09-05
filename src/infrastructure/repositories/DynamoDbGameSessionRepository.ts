@@ -28,7 +28,7 @@ export class DynamoDbGameSessionRepository implements GameSessionRepository {
     try {
       await this.client.send(new PutCommand({
         TableName: this.tableName,
-        Item: { sessionId: id, gameId: session.category.id, ...session, createdAt: timestamp, updatedAt: timestamp, completedAt: null },
+        Item: { sessionId: id, ...session, createdAt: timestamp, updatedAt: timestamp, completedAt: null },
         ConditionExpression: "attribute_not_exists(sessionId)",
       }));
     } catch (error) {
@@ -52,16 +52,16 @@ export class DynamoDbGameSessionRepository implements GameSessionRepository {
       await this.client.send(new UpdateCommand({
         TableName: this.tableName,
         Key: { sessionId: id },
-        UpdateExpression: "SET #player = :player, #category = :category, #difficulty = :difficulty, #questions = :questions, #currentQuestionIndex = :currentQuestionIndex, #score = :score, #answers = :answers, #selectedAnswerId = :selectedAnswerId, #status = :status, #revision = :revision, #updatedAt = :updatedAt, #completedAt = :completedAt",
+        UpdateExpression: "SET #gameId = :gameId, #player = :player, #category = :category, #difficulty = :difficulty, #questions = :questions, #currentQuestionIndex = :currentQuestionIndex, #score = :score, #answers = :answers, #selectedAnswerId = :selectedAnswerId, #status = :status, #revision = :revision, #updatedAt = :updatedAt, #completedAt = :completedAt",
         ConditionExpression: "#revision = :expectedRevision",
         ExpressionAttributeNames: {
-          "#player": "player", "#category": "category", "#difficulty": "difficulty", "#questions": "questions",
+          "#gameId": "gameId", "#player": "player", "#category": "category", "#difficulty": "difficulty", "#questions": "questions",
           "#currentQuestionIndex": "currentQuestionIndex", "#score": "score", "#answers": "answers",
           "#selectedAnswerId": "selectedAnswerId", "#status": "status", "#revision": "revision",
           "#updatedAt": "updatedAt", "#completedAt": "completedAt",
         },
         ExpressionAttributeValues: {
-          ":player": session.player, ":category": session.category, ":difficulty": session.difficulty,
+          ":gameId": session.gameId, ":player": session.player, ":category": session.category, ":difficulty": session.difficulty,
           ":questions": session.questions, ":currentQuestionIndex": session.currentQuestionIndex, ":score": session.score,
           ":answers": session.answers, ":selectedAnswerId": session.selectedAnswerId, ":status": session.status,
           ":revision": session.revision, ":expectedRevision": expectedRevision, ":updatedAt": timestamp,
@@ -77,10 +77,11 @@ export class DynamoDbGameSessionRepository implements GameSessionRepository {
 function toSession(value: unknown): GameSession {
   if (!value || typeof value !== "object") throw new Error("DynamoDB returned an invalid game session record.");
   const item = value as Partial<GameSession>;
-  if (!item.player || !item.category || !item.difficulty || !Array.isArray(item.questions) || !Array.isArray(item.answers) || typeof item.currentQuestionIndex !== "number" || typeof item.score !== "number" || typeof item.revision !== "number" || (item.status !== "playing" && item.status !== "completed")) {
+  if (!item.player || !hasValidPlayerAge(item.player) || !item.category || !item.difficulty || !Array.isArray(item.questions) || !Array.isArray(item.answers) || typeof item.currentQuestionIndex !== "number" || typeof item.score !== "number" || typeof item.revision !== "number" || (item.status !== "playing" && item.status !== "completed")) {
     throw new Error("DynamoDB returned an invalid game session record.");
   }
   return {
+    gameId: typeof item.gameId === "string" ? item.gameId : item.category.id,
     revision: item.revision,
     player: item.player,
     category: item.category,
@@ -92,6 +93,12 @@ function toSession(value: unknown): GameSession {
     selectedAnswerId: typeof item.selectedAnswerId === "string" ? item.selectedAnswerId : null,
     status: item.status,
   };
+}
+
+function hasValidPlayerAge(value: unknown): boolean {
+  if (!value || typeof value !== "object" || !("age" in value)) return false;
+  const { age } = value as { age?: unknown };
+  return typeof age === "number" && Number.isInteger(age) && age > 0;
 }
 
 function translatePersistenceError(error: unknown, operation: string, resourceId?: string): ApplicationError | PersistenceError {

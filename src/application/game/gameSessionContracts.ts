@@ -13,6 +13,19 @@ export interface PublicQuestion {
   image?: string;
 }
 
+export interface PublicGameQuestion extends PublicQuestion {
+  categoryId: string;
+  difficulty: Difficulty;
+}
+
+export interface PublicGame {
+  id: string;
+  title: string;
+  category: Category;
+  difficulties: Difficulty[];
+  questions: PublicGameQuestion[];
+}
+
 export interface PublicGameSession {
   id: string;
   player: Player;
@@ -34,6 +47,7 @@ export interface GameSetupResponse {
 export interface StartGameSessionCommand {
   playerId: string;
   categoryId: string;
+  gameId?: string;
   difficulty: Difficulty;
 }
 

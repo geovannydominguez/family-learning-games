@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ApplicationError, PersistenceError } from "../../application/errors.ts";
+import type { GenerateGameService } from "../../application/game/generateGameService.ts";
 import { GameSessionService } from "../../application/game/gameSessionService.ts";
 import { InMemoryGameSessionRepository } from "../../infrastructure/repositories/InMemoryGameSessionRepository.ts";
 import { MockGameRepository } from "../../repositories/game/MockGameRepository.ts";
@@ -53,6 +54,106 @@ test("start and answer routes use JSON contracts and keep answer keys secret", a
   assert.equal(JSON.parse(answer.body).nextSession.currentQuestionIndex, 1);
 });
 
+test("accepts optional gameId when starting a session", async () => {
+  const games = new MockGameRepository();
+  const base = await games.findById("animals");
+  assert.ok(base);
+  await games.create({ ...base, id: "ai-animals-1" });
+  const sessions = new InMemoryGameSessionRepository();
+  const router = createHttpRouter({
+    games,
+    sessionService: new GameSessionService(games, sessions, () => "session-ai", () => 0),
+    log: () => {},
+  });
+
+  const response = await router({
+    requestId: "r-ai",
+    method: "POST",
+    path: "/game-sessions",
+    body: JSON.stringify({ playerId: "amelia", categoryId: "animals", gameId: "ai-animals-1", difficulty: "easy" }),
+  });
+
+  assert.equal(response.statusCode, 201);
+  assert.equal((await sessions.findById("session-ai"))?.gameId, "ai-animals-1");
+});
+
+test("POST /games/generate returns the existing public game shape without answer keys", async () => {
+  const games = new MockGameRepository();
+  const generated = await games.findById("animals");
+  assert.ok(generated);
+  const commands: unknown[] = [];
+  const generationService = { generate: async (command: unknown) => {
+    commands.push(command);
+    return { ...generated, id: "ai-animals-1" };
+  } } as unknown as GenerateGameService;
+  const router = createHttpRouter({
+    games,
+    sessionService: new GameSessionService(games, new InMemoryGameSessionRepository()),
+    generationService,
+    log: () => {},
+  });
+
+  const response = await router({
+    requestId: "generate-1",
+    method: "POST",
+    path: "/games/generate",
+    body: JSON.stringify({ topic: "animals", difficulty: "easy", questionCount: 10, playerId: "amelia" }),
+  });
+
+  assert.equal(response.statusCode, 201);
+  assert.equal(JSON.parse(response.body).id, "ai-animals-1");
+  assert.equal(response.body.includes("isCorrect"), false);
+  assert.deepEqual(commands, [{ topic: "animals", difficulty: "easy", questionCount: 10, playerId: "amelia" }]);
+});
+
+test("POST /games/generate maps generation errors to safe status contracts", async () => {
+  const scenarios: Array<{ error: Error; status: number; code: string }> = [
+    { error: new ApplicationError("INVALID_GENERATION_REQUEST", "Generation request is invalid."), status: 400, code: "INVALID_GENERATION_REQUEST" },
+    { error: new ApplicationError("AI_GENERATION_DISABLED", "AI game generation is disabled."), status: 503, code: "AI_GENERATION_DISABLED" },
+    { error: new ApplicationError("AI_GENERATED_CONTENT_INVALID", "Generated content is invalid."), status: 422, code: "AI_GENERATED_CONTENT_INVALID" },
+    { error: new ApplicationError("AI_GENERATION_FAILED", "AI game generation failed."), status: 502, code: "AI_GENERATION_FAILED" },
+    { error: new ApplicationError("GAME_ID_CONFLICT", "Game identity already exists."), status: 409, code: "GAME_ID_CONFLICT" },
+    { error: new PersistenceError("create-game", new Error("secret provider detail"), "ai-safe"), status: 500, code: "UNEXPECTED_ERROR" },
+  ];
+
+  for (const scenario of scenarios) {
+    const games = new MockGameRepository();
+    const generationService = { generate: async () => { throw scenario.error; } } as unknown as GenerateGameService;
+    const router = createHttpRouter({
+      games,
+      sessionService: new GameSessionService(games, new InMemoryGameSessionRepository()),
+      generationService,
+      log: () => {},
+    });
+    const response = await router({
+      requestId: "generate-error",
+      method: "POST",
+      path: "/games/generate",
+      body: JSON.stringify({ topic: "animals", difficulty: "easy", questionCount: 10, playerId: "amelia" }),
+    });
+
+    assert.equal(response.statusCode, scenario.status);
+    assert.equal(JSON.parse(response.body).error.code, scenario.code);
+    assert.equal(response.body.includes("secret"), false);
+  }
+});
+
+test("POST /games/generate safely rejects malformed request JSON", async () => {
+  const games = new MockGameRepository();
+  const generationService = { generate: async () => { throw new Error("must not run"); } } as unknown as GenerateGameService;
+  const router = createHttpRouter({
+    games,
+    sessionService: new GameSessionService(games, new InMemoryGameSessionRepository()),
+    generationService,
+    log: () => {},
+  });
+
+  const response = await router({ requestId: "bad-json", method: "POST", path: "/games/generate", body: "{" });
+
+  assert.equal(response.statusCode, 400);
+  assert.equal(JSON.parse(response.body).error.code, "INVALID_GENERATION_REQUEST");
+});
+
 test("maps malformed JSON, missing sessions, invalid state and unknown routes", async () => {
   const { router, sessions } = createFixture();
   const malformed = await router({ requestId: "r", method: "POST", path: "/game-sessions", body: "{" });
@@ -87,7 +188,7 @@ test("maps optimistic persistence conflicts to a safe 409 response", async () =>
 
 test("returns safe 500 errors and one structured log per request", async () => {
   const logs: unknown[] = [];
-  const games = { findAll: async () => [], findById: async () => null, getPlayers: async () => { throw new Error("secret stack"); }, getCategories: async () => [], getQuestions: async () => [] };
+  const games = { create: async () => {}, findAll: async () => [], findById: async () => null, getPlayers: async () => { throw new Error("secret stack"); }, getCategories: async () => [], getQuestions: async () => [] };
   const router = createHttpRouter({ games, sessionService: {} as GameSessionService, log: (record) => logs.push(record) });
   const response = await router({ requestId: "req", method: "GET", path: "/game-setup" });
   assert.equal(response.statusCode, 500);
@@ -104,6 +205,7 @@ test("logs explicit sanitized persistence provenance while returning a generic 5
     $metadata: { requestId: "secret-request-id" },
   }), "animals");
   const games = {
+    create: async () => {},
     findAll: async () => [],
     findById: async () => { throw persistenceFailure; },
     getPlayers: async () => [],
@@ -142,7 +244,7 @@ test("does not classify expected conflicts as 500 persistence diagnostics", asyn
 test("omits unsafe persistence resource identifiers from diagnostics", async () => {
   const logs: unknown[] = [];
   const failure = new PersistenceError("get-game", new Error("transport"), "unsafe/session\nvalue");
-  const games = { findAll: async () => [], findById: async () => { throw failure; }, getPlayers: async () => [], getCategories: async () => [], getQuestions: async () => [] };
+  const games = { create: async () => {}, findAll: async () => [], findById: async () => { throw failure; }, getPlayers: async () => [], getCategories: async () => [], getQuestions: async () => [] };
   const router = createHttpRouter({ games, sessionService: {} as GameSessionService, log: (record) => logs.push(record) });
 
   await router({ requestId: "r", method: "GET", path: "/games/animals" });

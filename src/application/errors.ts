@@ -3,7 +3,12 @@ export type ApplicationErrorCode =
   | "RESOURCE_NOT_FOUND"
   | "SESSION_NOT_FOUND"
   | "INVALID_SESSION_STATE"
-  | "SESSION_CONFLICT";
+  | "SESSION_CONFLICT"
+  | "GAME_ID_CONFLICT"
+  | "INVALID_GENERATION_REQUEST"
+  | "AI_GENERATION_DISABLED"
+  | "AI_GENERATION_FAILED"
+  | "AI_GENERATED_CONTENT_INVALID";
 
 export class ApplicationError extends Error {
   readonly code: ApplicationErrorCode;

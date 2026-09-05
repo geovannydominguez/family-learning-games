@@ -15,7 +15,7 @@ import type {
   Question,
 } from "../../domain/game/types.ts";
 
-const player: Player = { id: "amelia", name: "Amelia", avatar: "👧" };
+const player: Player = { id: "amelia", name: "Amelia", avatar: "👧", age: 4 };
 const category: Category = {
   id: "animals",
   name: "Animales",
@@ -99,6 +99,7 @@ test("rejects an insufficient question pool", () => {
 
 test("creates a clean initial 10-question session", () => {
   const session = createGameSession({
+    gameId: "ai-animals-1",
     player,
     category,
     difficulty: "normal",
@@ -106,6 +107,7 @@ test("creates a clean initial 10-question session", () => {
     random: deterministicRandom,
   });
 
+  assert.equal(session.gameId, "ai-animals-1");
   assert.equal(session.questions.length, 10);
   assert.equal(session.currentQuestionIndex, 0);
   assert.equal(session.score, 0);
@@ -201,6 +203,7 @@ test("restart keeps selections and clears game progress", () => {
 
   const restarted = restartGameSession(session, questions, () => 0.75);
 
+  assert.equal(restarted.gameId, session.gameId);
   assert.equal(restarted.player.id, player.id);
   assert.equal(restarted.category.id, category.id);
   assert.equal(restarted.difficulty, "easy");

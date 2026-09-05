@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
-import type { AnswerFeedback, GameSetupResponse, PublicGameSession } from "@/application/game/gameSessionContracts";
+import type { AnswerFeedback, GameSetupResponse, PublicGame, PublicGameSession } from "@/application/game/gameSessionContracts";
 import type { Category, Difficulty, Player } from "@/domain/game/types";
-import { createGameApiClient, GameApiError } from "@/infrastructure/http/GameApiClient";
+import { createGameApiClient } from "@/infrastructure/http/GameApiClient";
+import { buildStartSessionCommand, gameUiErrorMessage } from "./gameUiState";
 
-type FlowStep = "home" | "player" | "category" | "difficulty" | "game";
+type FlowStep = "home" | "player" | "category" | "difficulty" | "generate" | "game";
 
 const difficultyOptions: Array<{ id: Difficulty; label: string; icon: string; description: string }> = [
   { id: "easy", label: "Fácil", icon: "🌱", description: "Para empezar con calma" },
@@ -14,21 +15,15 @@ const difficultyOptions: Array<{ id: Difficulty; label: string; icon: string; de
   { id: "hard", label: "Difícil", icon: "🚀", description: "Para grandes exploradores" },
 ];
 
-function errorMessage(error: unknown, fallback: string): string {
-  if (error instanceof GameApiError) {
-    if (error.code === "NETWORK_ERROR") return "No pudimos conectar con el servicio. Revisa tu conexión e inténtalo otra vez.";
-    if (error.code === "MISSING_CONFIGURATION") return "El servicio de juegos no está configurado. Define NEXT_PUBLIC_GAME_API_BASE_URL.";
-    if (error.code === "SESSION_NOT_FOUND") return "La partida expiró. Inicia una nueva para continuar.";
-    return error.message;
-  }
-  return fallback;
-}
-
 export function QuizGame() {
   const [setup, setSetup] = useState<GameSetupResponse | null>(null);
   const [step, setStep] = useState<FlowStep>("home");
   const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
+  const [selectedGameId, setSelectedGameId] = useState<string | undefined>();
+  const [generationTopic, setGenerationTopic] = useState("");
+  const [generationDifficulty, setGenerationDifficulty] = useState<Difficulty>("easy");
+  const [generatedGame, setGeneratedGame] = useState<PublicGame | null>(null);
   const [session, setSession] = useState<PublicGameSession | null>(null);
   const [feedback, setFeedback] = useState<AnswerFeedback | null>(null);
   const [pendingSession, setPendingSession] = useState<PublicGameSession | null>(null);
@@ -45,7 +40,7 @@ export function QuizGame() {
       setSetup(await createGameApiClient().getSetup());
     } catch (caught) {
       setSetup(null);
-      setError(errorMessage(caught, "No pudimos preparar el juego."));
+      setError(gameUiErrorMessage(caught, "No pudimos preparar el juego."));
     } finally {
       setLoadingSetup(false);
     }
@@ -61,6 +56,8 @@ export function QuizGame() {
     if (!player) return setError("No pudimos encontrar ese jugador. Elige uno de la lista.");
     setSelectedPlayer(player);
     setSelectedCategory(null);
+    setSelectedGameId(undefined);
+    setGeneratedGame(null);
     setSession(null);
     setError(null);
     setStep("category");
@@ -73,23 +70,62 @@ export function QuizGame() {
       return setStep(selectedPlayer ? "category" : "player");
     }
     setSelectedCategory(category);
+    setSelectedGameId(undefined);
+    setGeneratedGame(null);
     setSession(null);
     setError(null);
     setStep("difficulty");
   }
 
-  async function startGame(difficulty: Difficulty) {
+  async function startGame(difficulty: Difficulty, gameId = selectedGameId) {
     if (!selectedPlayer || !selectedCategory) return;
     setSubmitting(true);
     setError(null);
     try {
-      const started = await createGameApiClient().startSession({ playerId: selectedPlayer.id, categoryId: selectedCategory.id, difficulty });
+      const started = await createGameApiClient().startSession(buildStartSessionCommand(
+        selectedPlayer.id,
+        selectedCategory.id,
+        difficulty,
+        gameId,
+      ));
       setSession(started);
       setFeedback(null);
       setPendingSession(null);
       setStep("game");
     } catch (caught) {
-      setError(errorMessage(caught, "No pudimos iniciar la partida."));
+      setError(gameUiErrorMessage(caught, "No pudimos iniciar la partida."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function generateGame(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedPlayer) {
+      setError("Elige un jugador antes de crear un juego.");
+      setStep("player");
+      return;
+    }
+    const topic = generationTopic.trim();
+    if (!topic) {
+      setError("Escribe un tema válido de hasta 80 caracteres y elige una dificultad.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    setGeneratedGame(null);
+    try {
+      const game = await createGameApiClient().generateGame({
+        topic,
+        difficulty: generationDifficulty,
+        questionCount: 10,
+        playerId: selectedPlayer.id,
+      });
+      setGeneratedGame(game);
+      setSelectedCategory(game.category);
+      setSelectedGameId(game.id);
+    } catch (caught) {
+      setError(gameUiErrorMessage(caught, "No pudimos crear el juego."));
     } finally {
       setSubmitting(false);
     }
@@ -105,7 +141,7 @@ export function QuizGame() {
       setFeedback(result.feedback);
       setPendingSession(result.nextSession);
     } catch (caught) {
-      setError(errorMessage(caught, "No pudimos guardar tu respuesta. Inténtalo otra vez."));
+      setError(gameUiErrorMessage(caught, "No pudimos guardar tu respuesta. Inténtalo otra vez."));
     } finally {
       setSubmitting(false);
       setAnsweringId(null);
@@ -122,6 +158,9 @@ export function QuizGame() {
 
   function chooseAnotherGame() {
     setSelectedCategory(null);
+    setSelectedGameId(undefined);
+    setGeneratedGame(null);
+    setGenerationTopic("");
     setSession(null);
     setFeedback(null);
     setPendingSession(null);
@@ -154,6 +193,22 @@ export function QuizGame() {
   if (step === "category") return (
     <SelectionLayout headingRef={headingRef} eyebrow={`Jugando como ${selectedPlayer?.name ?? "familia"}`} title="¿Qué quieres aprender?" description="Elige una categoría para tu próxima partida." error={error} onBack={() => setStep("player")}>
       <div className="grid gap-4 sm:grid-cols-3">{setup.categories.map((category) => <button key={category.id} type="button" onClick={() => chooseCategory(category.id)} className="selection-card text-left"><span className="text-6xl" aria-hidden="true">{category.icon}</span><span className="mt-3 block text-2xl font-black text-slate-900">{category.name}</span><span className="mt-2 block text-base leading-relaxed text-slate-600">{category.description}</span></button>)}</div>
+      <div className="mt-8 border-t border-violet-100 pt-8 text-center"><p className="text-lg text-slate-700">¿Quieres explorar otro tema?</p><button type="button" className="button-secondary mt-4" onClick={() => { setError(null); setGeneratedGame(null); setStep("generate"); }}>✨ Crear un juego nuevo</button></div>
+    </SelectionLayout>
+  );
+
+  if (step === "generate") return (
+    <SelectionLayout headingRef={headingRef} eyebrow={`Jugando como ${selectedPlayer?.name ?? "familia"}`} title="Crea un juego nuevo" description="Elige un tema y una dificultad. El juego tendrá exactamente 10 preguntas." error={error} onBack={() => setStep("category")}>
+      <form className="mx-auto max-w-2xl" onSubmit={(event) => void generateGame(event)}>
+        <label htmlFor="generation-topic" className="block text-lg font-black text-slate-900">Tema del juego</label>
+        <input id="generation-topic" type="text" required maxLength={80} value={generationTopic} disabled={submitting} onChange={(event) => { setGenerationTopic(event.target.value); setGeneratedGame(null); }} placeholder="Por ejemplo: dinosaurios" className="mt-2 min-h-14 w-full rounded-2xl border-2 border-violet-200 bg-white px-4 text-lg outline-none focus-visible:ring-4 focus-visible:ring-violet-300 disabled:opacity-60" />
+        <label htmlFor="generation-difficulty" className="mt-6 block text-lg font-black text-slate-900">Dificultad</label>
+        <select id="generation-difficulty" value={generationDifficulty} disabled={submitting} onChange={(event) => { setGenerationDifficulty(event.target.value as Difficulty); setGeneratedGame(null); }} className="mt-2 min-h-14 w-full rounded-2xl border-2 border-violet-200 bg-white px-4 text-lg font-bold outline-none focus-visible:ring-4 focus-visible:ring-violet-300 disabled:opacity-60">
+          {difficultyOptions.filter((option) => setup.difficulties.includes(option.id)).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+        </select>
+        <button className="button-primary mt-7 w-full" type="submit" disabled={submitting}>{submitting ? "Creando juego…" : "Crear juego"}</button>
+      </form>
+      {generatedGame && <section className="mx-auto mt-8 max-w-2xl rounded-3xl bg-emerald-50 p-6 text-center" aria-live="polite"><span className="text-5xl" aria-hidden="true">{generatedGame.category.icon || "✨"}</span><h2 className="mt-3 text-2xl font-black text-slate-900">{generatedGame.title}</h2><p className="mt-2 text-slate-700">Tu juego está listo.</p><button type="button" className="button-primary mt-5" disabled={submitting} onClick={() => void startGame(generationDifficulty, generatedGame.id)}>{submitting ? "Iniciando…" : "Jugar ahora"}</button></section>}
     </SelectionLayout>
   );
 

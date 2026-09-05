@@ -1,9 +1,14 @@
-import { GetCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  GetCommand,
+  PutCommand,
+  ScanCommand,
+  type ScanCommandInput,
+} from "@aws-sdk/lib-dynamodb";
 
-import { PersistenceError } from "../../application/errors.ts";
+import { ApplicationError, PersistenceError } from "../../application/errors.ts";
 import type { Game, Player, Category, Question } from "../../domain/game/types.ts";
 import type { GameRepository, QuestionCriteria } from "../../repositories/game/GameRepository.ts";
-import { gameRecordToDomain, isGameRecord } from "./gameSeed.ts";
+import { gameDomainToRecord, gameRecordToDomain, isGameRecord } from "./gameSeed.ts";
 
 interface DocumentClient {
   send(command: object): Promise<unknown>;
@@ -12,23 +17,49 @@ interface DocumentClient {
 export class DynamoDbGameRepository implements GameRepository {
   private readonly client: DocumentClient;
   private readonly tableName: string;
+  private readonly now: () => string;
 
   constructor(
     client: DocumentClient,
     tableName: string,
+    now: () => string = () => new Date().toISOString(),
   ) {
     this.client = client;
     this.tableName = tableName;
+    this.now = now;
+  }
+
+  async create(game: Game): Promise<void> {
+    try {
+      await this.client.send(new PutCommand({
+        TableName: this.tableName,
+        Item: gameDomainToRecord(game, this.now()),
+        ConditionExpression: "attribute_not_exists(gameId)",
+      }));
+    } catch (error) {
+      if (isConditionalFailure(error)) {
+        throw new ApplicationError("GAME_ID_CONFLICT", "A game with this ID already exists.");
+      }
+      throw preserveOrTranslate(error, "create-game", game.id);
+    }
   }
 
   async findAll(): Promise<Game[]> {
-    let result: { Items?: unknown[] };
+    const items: unknown[] = [];
+    let exclusiveStartKey: ScanCommandInput["ExclusiveStartKey"];
     try {
-      result = (await this.client.send(new ScanCommand({ TableName: this.tableName }))) as { Items?: unknown[] };
+      do {
+        const result = (await this.client.send(new ScanCommand({
+          TableName: this.tableName,
+          ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+        }))) as { Items?: unknown[]; LastEvaluatedKey?: ScanCommandInput["ExclusiveStartKey"] };
+        items.push(...(result.Items ?? []));
+        exclusiveStartKey = result.LastEvaluatedKey;
+      } while (exclusiveStartKey);
     } catch (error) {
       throw preserveOrTranslate(error, "list-games");
     }
-    return (result.Items ?? [])
+    return items
       .map((item) => ({ game: toGame(item), sortOrder: readSortOrder(item) }))
       .sort((left, right) => left.sortOrder - right.sortOrder)
       .map(({ game }) => game);
@@ -45,22 +76,32 @@ export class DynamoDbGameRepository implements GameRepository {
   }
 
   async getPlayers(): Promise<Player[]> {
-    const games = await this.findAll();
+    const games = await this.findLegacySetupGames();
     const players = new Map<string, Player>();
     for (const game of games) for (const player of game.players) players.set(player.id, player);
     return [...players.values()];
   }
 
   async getCategories(): Promise<Category[]> {
-    return (await this.findAll()).map((game) => game.category);
+    const categories = new Map<string, Category>();
+    for (const game of await this.findLegacySetupGames()) categories.set(game.category.id, game.category);
+    return [...categories.values()];
   }
 
   async getQuestions(criteria: QuestionCriteria = {}): Promise<Question[]> {
-    const games = criteria.categoryId
-      ? [await this.findById(criteria.categoryId)].filter((game): game is Game => game !== null)
-      : await this.findAll();
-    return games.flatMap((game) => game.questions).filter((question) => !criteria.difficulty || question.difficulty === criteria.difficulty);
+    return (await this.findAll())
+      .filter((game) => !criteria.categoryId || game.category.id === criteria.categoryId)
+      .flatMap((game) => game.questions)
+      .filter((question) => !criteria.difficulty || question.difficulty === criteria.difficulty);
   }
+
+  private async findLegacySetupGames(): Promise<Game[]> {
+    return (await this.findAll()).filter((game) => game.id === game.category.id);
+  }
+}
+
+function isConditionalFailure(error: unknown): boolean {
+  return !!error && typeof error === "object" && "name" in error && error.name === "ConditionalCheckFailedException";
 }
 
 function preserveOrTranslate(error: unknown, operation: string, resourceId?: string): PersistenceError {

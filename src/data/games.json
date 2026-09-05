@@ -3,22 +3,26 @@
     {
       "id": "amelia",
       "name": "Amelia",
-      "avatar": "👧"
+      "avatar": "👧",
+      "age": 4
     },
     {
       "id": "joaquin",
       "name": "Joaquín",
-      "avatar": "👦"
+      "avatar": "👦",
+      "age": 6
     },
     {
       "id": "papa",
       "name": "Papá",
-      "avatar": "👨"
+      "avatar": "👨",
+      "age": 18
     },
     {
       "id": "mama",
       "name": "Mamá",
-      "avatar": "👩"
+      "avatar": "👩",
+      "age": 18
     }
   ],
   "categories": [

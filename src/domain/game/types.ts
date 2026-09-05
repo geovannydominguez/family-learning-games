@@ -4,6 +4,7 @@ export interface Player {
   id: string;
   name: string;
   avatar: string;
+  age: number;
 }
 
 export interface Category {
@@ -36,6 +37,7 @@ export interface PlayerAnswer {
 }
 
 export interface GameSession {
+  gameId: string;
   revision: number;
   player: Player;
   category: Category;

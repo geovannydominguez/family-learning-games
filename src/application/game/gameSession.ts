@@ -16,6 +16,7 @@ interface QuestionSelection {
 }
 
 interface CreateGameSessionInput {
+  gameId?: string;
   player: Player;
   category: Category;
   difficulty: Difficulty;
@@ -53,6 +54,7 @@ export function selectQuestions(
 }
 
 export function createGameSession({
+  gameId,
   player,
   category,
   difficulty,
@@ -60,6 +62,7 @@ export function createGameSession({
   random = Math.random,
 }: CreateGameSessionInput): GameSession {
   return {
+    gameId: gameId ?? category.id,
     revision: 0,
     player,
     category,
@@ -136,6 +139,7 @@ export function restartGameSession(
   random: () => number = Math.random,
 ): GameSession {
   return createGameSession({
+    gameId: session.gameId,
     player: session.player,
     category: session.category,
     difficulty: session.difficulty,

@@ -1,5 +1,7 @@
 import { ApplicationError, PersistenceError } from "../../application/errors.ts";
+import type { GenerateGameService } from "../../application/game/generateGameService.ts";
 import type { GameSessionService } from "../../application/game/gameSessionService.ts";
+import type { PublicGame } from "../../application/game/gameSessionContracts.ts";
 import type { Difficulty, Game } from "../../domain/game/types.ts";
 import type { GameRepository } from "../../repositories/game/GameRepository.ts";
 import type { HttpRequest, HttpResponse, RequestLog } from "./contracts.ts";
@@ -7,6 +9,7 @@ import type { HttpRequest, HttpResponse, RequestLog } from "./contracts.ts";
 interface RouterDependencies {
   games: GameRepository;
   sessionService: GameSessionService;
+  generationService?: GenerateGameService;
   log?: (record: RequestLog) => void;
   now?: () => number;
 }
@@ -17,6 +20,7 @@ const jsonHeaders = { "content-type": "application/json; charset=utf-8" };
 export function createHttpRouter({
   games,
   sessionService,
+  generationService,
   log = (record) => console.log(JSON.stringify(record)),
   now = Date.now,
 }: RouterDependencies) {
@@ -25,7 +29,7 @@ export function createHttpRouter({
     let response: HttpResponse;
     let caughtError: unknown;
     try {
-      response = await route(request, games, sessionService);
+      response = await route(request, games, sessionService, generationService);
     } catch (error) {
       caughtError = error;
       response = mapError(error);
@@ -75,6 +79,7 @@ function readRouteContext(request: HttpRequest): { operation: string; resourceId
   if (request.method === "GET" && request.path === "/games") return { operation: "list-games" };
   if (request.method === "GET" && request.path === "/game-setup") return { operation: "get-game-setup" };
   if (request.method === "POST" && request.path === "/game-sessions") return { operation: "start-game-session" };
+  if (request.method === "POST" && request.path === "/games/generate") return { operation: "generate-game" };
   const game = request.path.match(/^\/games\/([^/]+)$/);
   if (request.method === "GET" && game) return withResource("get-game", game[1]);
   const answer = request.path.match(/^\/game-sessions\/([^/]+)\/answers$/);
@@ -93,10 +98,28 @@ function withResource(operation: string, encodedId: string): { operation: string
   }
 }
 
-async function route(request: HttpRequest, games: GameRepository, sessionService: GameSessionService): Promise<HttpResponse> {
+async function route(
+  request: HttpRequest,
+  games: GameRepository,
+  sessionService: GameSessionService,
+  generationService: GenerateGameService | undefined,
+): Promise<HttpResponse> {
   if (request.method === "GET" && request.path === "/games") {
     const catalog = await games.findAll();
     return json(200, catalog.map(toPublicGame));
+  }
+  if (request.method === "POST" && request.path === "/games/generate") {
+    if (!generationService) {
+      throw new ApplicationError("AI_GENERATION_DISABLED", "AI game generation is disabled.");
+    }
+    const body = parseGenerationObject(request.body);
+    const game = await generationService.generate({
+      topic: body.topic as string,
+      difficulty: body.difficulty as Difficulty,
+      questionCount: body.questionCount as number,
+      playerId: body.playerId as string,
+    });
+    return json(201, toPublicGame(game));
   }
   const gameRoute = request.path.match(/^\/games\/([^/]+)$/);
   if (request.method === "GET" && gameRoute) {
@@ -113,6 +136,7 @@ async function route(request: HttpRequest, games: GameRepository, sessionService
     const session = await sessionService.start({
       playerId: readString(body, "playerId"),
       categoryId: readString(body, "categoryId"),
+      gameId: readOptionalString(body, "gameId"),
       difficulty: readDifficulty(body.difficulty),
     });
     return json(201, session);
@@ -129,7 +153,7 @@ async function route(request: HttpRequest, games: GameRepository, sessionService
   return json(404, { error: { code: "RESOURCE_NOT_FOUND", message: "Route was not found." } });
 }
 
-function toPublicGame(game: Game) {
+function toPublicGame(game: Game): PublicGame {
   return {
     id: game.id,
     title: game.title,
@@ -145,6 +169,14 @@ function toPublicGame(game: Game) {
       answers: question.answers.map(({ id, text }) => ({ id, text })),
     })),
   };
+}
+
+function parseGenerationObject(body: string | null | undefined): Record<string, unknown> {
+  try {
+    return parseObject(body);
+  } catch {
+    throw new ApplicationError("INVALID_GENERATION_REQUEST", "Generation request is invalid.");
+  }
 }
 
 function parseObject(body: string | null | undefined): Record<string, unknown> {
@@ -163,6 +195,11 @@ function readString(body: Record<string, unknown>, key: string): string {
   return value;
 }
 
+function readOptionalString(body: Record<string, unknown>, key: string): string | undefined {
+  if (!(key in body)) return undefined;
+  return readString(body, key);
+}
+
 function readDifficulty(value: unknown): Difficulty {
   if (typeof value !== "string" || !difficulties.includes(value as Difficulty)) throw new ApplicationError("INVALID_REQUEST", "difficulty is invalid.");
   return value as Difficulty;
@@ -170,10 +207,30 @@ function readDifficulty(value: unknown): Difficulty {
 
 function mapError(error: unknown): HttpResponse {
   if (error instanceof ApplicationError) {
-    const status = error.code === "INVALID_REQUEST" ? 400 : error.code === "INVALID_SESSION_STATE" || error.code === "SESSION_CONFLICT" ? 409 : 404;
+    const status = applicationErrorStatus(error.code);
     return json(status, { error: { code: error.code, message: error.message } });
   }
   return json(500, { error: { code: "UNEXPECTED_ERROR", message: "An unexpected error occurred." } });
+}
+
+function applicationErrorStatus(code: ApplicationError["code"]): number {
+  switch (code) {
+    case "INVALID_REQUEST":
+    case "INVALID_GENERATION_REQUEST":
+      return 400;
+    case "AI_GENERATED_CONTENT_INVALID":
+      return 422;
+    case "INVALID_SESSION_STATE":
+    case "SESSION_CONFLICT":
+    case "GAME_ID_CONFLICT":
+      return 409;
+    case "AI_GENERATION_FAILED":
+      return 502;
+    case "AI_GENERATION_DISABLED":
+      return 503;
+    default:
+      return 404;
+  }
 }
 
 function json(statusCode: number, body: unknown): HttpResponse {
