@@ -20,6 +20,7 @@ export interface FamilyLearningGamesBackendStackProps extends StackProps {
   bedrockModelId?: string;
   generationThrottleRateLimit?: number;
   generationThrottleBurstLimit?: number;
+  allowedOrigins?: string[];
 }
 
 export class FamilyLearningGamesBackendStack extends Stack {
@@ -32,7 +33,7 @@ export class FamilyLearningGamesBackendStack extends Stack {
       },
     });
 
-    const frontendOrigin = this.node.tryGetContext("frontendOrigin") ?? "http://localhost:3000";
+    const allowedOrigins = readAllowedOrigins(this.node, props?.allowedOrigins);
     const environment = this.node.tryGetContext("environment") ?? "dev";
     const aiGameGenerationEnabled = props?.aiGameGenerationEnabled
       ?? readBooleanContext(this.node.tryGetContext("aiGameGenerationEnabled"), "aiGameGenerationEnabled", false);
@@ -150,7 +151,7 @@ export class FamilyLearningGamesBackendStack extends Stack {
     const api = new HttpApi(this, "BackendApi", {
       apiName: "family-learning-games-api",
       corsPreflight: {
-        allowOrigins: [frontendOrigin],
+        allowOrigins: allowedOrigins,
         allowMethods: [CorsHttpMethod.GET, CorsHttpMethod.POST, CorsHttpMethod.OPTIONS],
         allowHeaders: ["content-type"],
       },
@@ -202,6 +203,34 @@ function readPositiveNumber(value: unknown, key: string, integer = false): numbe
 
 function readStringContext(value: unknown, defaultValue: string): string {
   return typeof value === "string" && value.trim() ? value.trim() : defaultValue;
+}
+
+const originPattern = /^https?:\/\/[^\s/]+$/;
+
+function readAllowedOrigins(node: Construct["node"], propsOverride?: string[]): string[] {
+  if (propsOverride !== undefined) return normalizeOrigins(propsOverride, "allowedOrigins");
+
+  const allowedOriginsContext = node.tryGetContext("allowedOrigins");
+  if (allowedOriginsContext !== undefined) {
+    const raw = String(allowedOriginsContext).split(",").map((origin) => origin.trim()).filter(Boolean);
+    return normalizeOrigins(raw, "allowedOrigins");
+  }
+
+  const frontendOriginContext = node.tryGetContext("frontendOrigin");
+  const frontendOrigin = typeof frontendOriginContext === "string" && frontendOriginContext.trim()
+    ? frontendOriginContext.trim()
+    : "http://localhost:3000";
+  return normalizeOrigins([frontendOrigin], "frontendOrigin");
+}
+
+function normalizeOrigins(origins: string[], key: string): string[] {
+  if (origins.length === 0) throw new Error(`Invalid CDK context ${key}: expected at least one origin.`);
+  for (const origin of origins) {
+    if (!originPattern.test(origin)) {
+      throw new Error(`Invalid CDK context ${key}: "${origin}" must be an http(s) origin without a trailing slash.`);
+    }
+  }
+  return [...new Set(origins)];
 }
 
 function createGuardrailPolicy() {

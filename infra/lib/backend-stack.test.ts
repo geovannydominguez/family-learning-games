@@ -198,3 +198,45 @@ test("prefixes DynamoDB table names with the configured environment", () => {
   template.hasResourceProperties("AWS::DynamoDB::Table", { TableName: "test-family-learning-games-games" });
   template.hasResourceProperties("AWS::DynamoDB::Table", { TableName: "test-family-learning-games-game-sessions" });
 });
+
+test("defaults CORS to localhost when no origin context is supplied", () => {
+  const template = Template.fromStack(new FamilyLearningGamesBackendStack(new App(), "DefaultOriginStack"));
+  template.hasResourceProperties("AWS::ApiGatewayV2::Api", {
+    CorsConfiguration: Match.objectLike({ AllowOrigins: ["http://localhost:3000"] }),
+  });
+});
+
+test("accepts a comma-separated allowedOrigins context alongside localhost", () => {
+  const app = new App({ context: {
+    allowedOrigins: "http://localhost:3000, https://main.d123456789.amplifyapp.com",
+  } });
+  const template = Template.fromStack(new FamilyLearningGamesBackendStack(app, "AllowedOriginsStack"));
+  template.hasResourceProperties("AWS::ApiGatewayV2::Api", {
+    CorsConfiguration: Match.objectLike({
+      AllowOrigins: ["http://localhost:3000", "https://main.d123456789.amplifyapp.com"],
+    }),
+  });
+});
+
+test("lets explicit allowedOrigins props override context and rejects malformed origins", () => {
+  const app = new App({ context: { allowedOrigins: "http://localhost:3000" } });
+  const template = Template.fromStack(new FamilyLearningGamesBackendStack(app, "AllowedOriginsPropsStack", {
+    allowedOrigins: ["https://family.example.com"],
+  }));
+  template.hasResourceProperties("AWS::ApiGatewayV2::Api", {
+    CorsConfiguration: Match.objectLike({ AllowOrigins: ["https://family.example.com"] }),
+  });
+
+  const invalidOriginContexts = [
+    { allowedOrigins: "" },
+    { allowedOrigins: "not-an-origin" },
+    { allowedOrigins: "https://family.example.com/" },
+    { frontendOrigin: "ftp://family.example.com" },
+  ];
+  invalidOriginContexts.forEach((context, index) => {
+    assert.throws(
+      () => new FamilyLearningGamesBackendStack(new App({ context }), `InvalidOriginStack${index}`),
+      /invalid CDK context/i,
+    );
+  });
+});
