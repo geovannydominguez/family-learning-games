@@ -108,14 +108,15 @@ Use configuration such as:
 
 ```text
 AI_GAME_GENERATION_ENABLED
-BEDROCK_MODEL_ID
+BEDROCK_GENERATOR_MODEL_ID   # amazon.nova-lite-v1:0
+BEDROCK_VALIDATOR_MODEL_ID   # amazon.nova-pro-v1:0
 BEDROCK_REGION
 BEDROCK_GUARDRAIL_ID
 BEDROCK_GUARDRAIL_VERSION
 NEXT_PUBLIC_GAME_API_BASE_URL
 ```
 
-AI generation defaults to disabled. Bedrock model, region, and Guardrail configuration are required only when it is enabled.
+AI generation defaults to disabled. Bedrock generator/validator models, region, and Guardrail configuration are required only when it is enabled. See `ADR-011` for the two-model generation pipeline (Nova Lite drafts; Nova Pro blind-solves each question; Application deterministically compares answers before persistence).
 
 ## Persistence
 Use the existing `Games` and `GameSessions` tables. Do not introduce RDS, Aurora, S3-as-database, Redis, or ElastiCache to satisfy v0.5.

@@ -27,7 +27,8 @@ test("AI generation defaults to disabled without requiring or instantiating Bedr
 
 test("enabled generation requires every Bedrock configuration value", () => {
   const required = [
-    "BEDROCK_MODEL_ID",
+    "BEDROCK_GENERATOR_MODEL_ID",
+    "BEDROCK_VALIDATOR_MODEL_ID",
     "BEDROCK_REGION",
     "BEDROCK_GUARDRAIL_ID",
     "BEDROCK_GUARDRAIL_VERSION",
@@ -35,7 +36,8 @@ test("enabled generation requires every Bedrock configuration value", () => {
   const complete = {
     ...baseEnvironment,
     AI_GAME_GENERATION_ENABLED: "true",
-    BEDROCK_MODEL_ID: "model",
+    BEDROCK_GENERATOR_MODEL_ID: "amazon.nova-lite-v1:0",
+    BEDROCK_VALIDATOR_MODEL_ID: "amazon.nova-pro-v1:0",
     BEDROCK_REGION: "us-east-1",
     BEDROCK_GUARDRAIL_ID: "guardrail",
     BEDROCK_GUARDRAIL_VERSION: "1",
@@ -66,7 +68,8 @@ test("enabled generation constructs one regional Bedrock client", () => {
     environment: {
       ...baseEnvironment,
       AI_GAME_GENERATION_ENABLED: "true",
-      BEDROCK_MODEL_ID: "model",
+      BEDROCK_GENERATOR_MODEL_ID: "amazon.nova-lite-v1:0",
+      BEDROCK_VALIDATOR_MODEL_ID: "amazon.nova-pro-v1:0",
       BEDROCK_REGION: "us-west-2",
       BEDROCK_GUARDRAIL_ID: "guardrail",
       BEDROCK_GUARDRAIL_VERSION: "DRAFT",

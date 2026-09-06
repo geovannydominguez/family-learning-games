@@ -18,7 +18,15 @@ import {
   type GameGenerator,
   type GenerationFailureType,
   type GenerationValidationRule,
+  type PreviousGenerationIssue,
 } from "./GameGenerator.ts";
+import {
+  GameValidatorError,
+  issueSeverity,
+  type GameValidationIssue,
+  type GameValidationResult,
+  type GameValidator,
+} from "./GameValidator.ts";
 
 const difficulties: readonly Difficulty[] = ["easy", "normal", "hard"];
 const questionCount = 10;
@@ -34,6 +42,67 @@ const generatedFieldLimits = {
 } as const;
 
 const correlationIdPattern = /^[A-Za-z0-9._~=+/-]{1,128}$/;
+/** A content-repair round is consumed only when generation yields evaluable candidates. */
+const defaultRepairRounds = 5;
+/** Bounded per-round retries for failures that produced no candidate content (guardrail, transport). */
+const defaultTechnicalRetriesPerRound = 1;
+
+/**
+ * Coarse, provider-neutral lifecycle event for the two-model generation
+ * pipeline. Carries counts and stable issue codes only, never prompts, model
+ * output, question/answer text, or personal data.
+ *
+ * The pipeline is now question-level repair rounds, not whole-draft regeneration:
+ * accepted questions are kept and only failed slots are re-requested.
+ */
+export interface GenerationPipelineEvent {
+  event:
+    | "AI_GAME_GENERATION_ATTEMPT"
+    | "AI_GAME_REPAIR_ROUND"
+    | "AI_GAME_VALIDATION_SUCCEEDED"
+    | "AI_GAME_VALIDATION_REJECTED"
+    | "AI_GAME_GENERATION_EXHAUSTED"
+    | "AI_GAME_VALIDATION_ERROR"
+    | "AI_GAME_GUARDRAIL_INTERVENED";
+  level: "info" | "warn" | "error";
+  correlationId?: string;
+  /** Repair round (1-based). `attempt` mirrors it for backward compatibility. */
+  attempt: number;
+  round?: number;
+  maxAttempts: number;
+  /** 0 for the round's first generation attempt, 1.. for a same-round technical retry. */
+  technicalRetry?: number;
+  /** Replacement questions asked for this round (10 on round 1, fewer afterwards). */
+  requestedQuestionCount?: number;
+  /** Total accepted questions in the pool. On success this is exactly 10. */
+  acceptedQuestionCount?: number;
+  /** AI_GAME_REPAIR_ROUND accounting (all per-round): */
+  generatedCount?: number;
+  acceptedCount?: number;
+  rejectedQuestionCount?: number;
+  issueCount?: number;
+  missingCount?: number;
+  questionCount?: number;
+  issueTypes?: string[];
+  /** Non-blocking quality observations; reported on AI_GAME_VALIDATION_SUCCEEDED. */
+  warningCount?: number;
+  warningTypes?: string[];
+  /** Present on per-question AI_GAME_VALIDATION_REJECTED events (slot index within the round). */
+  questionIndex?: number;
+  generatorAnswerIndex?: number;
+  validatorAnswerIndex?: number | null;
+  confident?: boolean;
+  ambiguous?: boolean;
+  /** Present on AI_GAME_GUARDRAIL_INTERVENED. Content-free: policy/filter tokens only. */
+  guardrailId?: string;
+  guardrailVersion?: string;
+  guardrailPolicies?: string[];
+  guardrailFilterTypes?: string[];
+  guardrailActions?: string[];
+  guardrailStopReason?: string;
+  generatorModel?: string;
+  validatorModel?: string;
+}
 
 /**
  * Structured, provider-neutral record emitted once per failed generation
@@ -51,31 +120,60 @@ export interface GenerationFailureDiagnostic {
   validationRule?: GenerationValidationRule;
   validationField?: string;
   stopReason?: string;
+  /** 1.. when this failure happened on a same-round technical retry. */
+  technicalRetry?: number;
+  /** For `guardrail_intervened` / `content_filtered`: which rule fired. Content-free. */
+  guardrailPolicies?: string[];
+  guardrailFilterTypes?: string[];
+  guardrailActions?: string[];
 }
 
 interface GenerateGameServiceOptions {
   enabled: boolean;
   createId?: () => string;
   logDiagnostic?: (diagnostic: GenerationFailureDiagnostic) => void;
+  logEvent?: (event: GenerationPipelineEvent) => void;
+  /** Max question-level content-repair rounds before failing. Defaults to 5. */
+  maxRepairRounds?: number;
+  /** @deprecated alias for `maxRepairRounds`, kept for backward compatibility. */
+  maxAttempts?: number;
+  /** Same-round retries for no-content failures (guardrail, transport). Defaults to 1. */
+  maxTechnicalRetriesPerRound?: number;
+  /** Opaque model labels, for observability only. */
+  models?: { generator?: string; validator?: string };
 }
 
 export class GenerateGameService {
   private readonly generator: GameGenerator;
+  private readonly validator: GameValidator;
   private readonly games: GameRepository;
   private readonly enabled: boolean;
   private readonly createId: () => string;
   private readonly logDiagnostic: (diagnostic: GenerationFailureDiagnostic) => void;
+  private readonly logEvent: (event: GenerationPipelineEvent) => void;
+  private readonly maxRepairRounds: number;
+  private readonly maxTechnicalRetriesPerRound: number;
+  private readonly models: { generator?: string; validator?: string };
 
   constructor(
     generator: GameGenerator,
+    validator: GameValidator,
     games: GameRepository,
     options: GenerateGameServiceOptions,
   ) {
     this.generator = generator;
+    this.validator = validator;
     this.games = games;
     this.enabled = options.enabled;
     this.createId = options.createId ?? randomUUID;
     this.logDiagnostic = options.logDiagnostic ?? (() => {});
+    this.logEvent = options.logEvent ?? (() => {});
+    this.maxRepairRounds = positiveRounds(options.maxRepairRounds)
+      ?? positiveRounds(options.maxAttempts)
+      ?? defaultRepairRounds;
+    this.maxTechnicalRetriesPerRound = nonNegativeInt(options.maxTechnicalRetriesPerRound)
+      ?? defaultTechnicalRetriesPerRound;
+    this.models = options.models ?? {};
   }
 
   async generate(command: GenerateGameCommand): Promise<Game> {
@@ -96,66 +194,460 @@ export class GenerateGameService {
       questionCount: normalizedCommand.questionCount,
       targetAge: player.age,
     };
-    const draft = await this.generateValidDraft(request, correlationId);
+    // Never persist before every question has passed every required validation.
+    const built = await this.assembleValidatedGame(request, correlationId);
     const game: Game = {
       id: `ai-${this.createId()}`,
-      title: draft.title,
-      category: draft.category,
+      title: built.title,
+      category: built.category,
       players,
-      questions: draft.questions,
+      questions: built.questions,
     };
 
     await this.games.create(game);
     return game;
   }
 
-  private async generateValidDraft(
+  /**
+   * Question-level repair pipeline. Valid questions are kept in an accepted
+   * pool; only failed slots are re-requested. Each round:
+   *   Nova Micro generates `missingCount` candidates
+   *     → per-question structural validation  (valid ones survive)
+   *     → uniqueness check against the accepted pool
+   *     → Nova Pro blind independent validation of the survivors
+   *     → per-question deterministic comparison (valid ones join the pool)
+   * The game is assembled and returned only when exactly 10 questions are
+   * accepted. Technical failures of either model fail closed (never persist).
+   */
+  private async assembleValidatedGame(
     request: GenerateGameRequest,
     correlationId: string | undefined,
-  ): Promise<GeneratedGameDraft> {
+  ): Promise<{ title: string; category: Category; questions: Question[] }> {
     const categoryId = toCategorySlug(request.topic);
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
-        const draft = await this.generator.generate(request);
-        // Application owns the category identity: the provider must not choose
-        // a durable identifier (see ADR-009). Fixing it here also removes the
-        // "missing category.id" / "category_mismatch" failure classes without
-        // touching validateAndNormalizeDraft.
-        applyCategoryIdentity(draft, categoryId);
-        return validateAndNormalizeDraft(draft, request);
-      } catch (error) {
-        const failure = classifyGenerationFailure(error);
-        this.emitFailure(attempt, correlationId, failure);
-        if (failure.failureType === "provider_error") {
-          throw new ApplicationError("AI_GENERATION_FAILED", "AI game generation failed.");
-        }
-        if (attempt === 2) {
-          throw new ApplicationError(
-            "AI_GENERATED_CONTENT_INVALID",
-            "AI generated content did not satisfy the game rules.",
-          );
+    const accepted: Question[] = [];
+    const acceptedTexts = new Set<string>();
+    const warningTypes = new Set<string>();
+    let meta: { title: string; category: Category } | undefined;
+    let previousIssues: readonly PreviousGenerationIssue[] = [];
+    let round = 0;
+
+    for (round = 1; round <= this.maxRepairRounds; round += 1) {
+      const missingCount = questionCount - accepted.length;
+      const genRequest: GenerateGameRequest = {
+        topic: request.topic,
+        difficulty: request.difficulty,
+        targetAge: request.targetAge,
+        questionCount: missingCount,
+        ...(acceptedTexts.size > 0 ? { existingQuestions: [...acceptedTexts] } : {}),
+        ...(previousIssues.length > 0 ? { previousIssues } : {}),
+      };
+
+      // 1) Generate replacement candidates. A failure that produces no candidate
+      //    content (guardrail block, transport error, malformed response) does
+      //    NOT consume the content-repair round: it gets a bounded same-round
+      //    technical retry first.
+      let raw: unknown;
+      for (let technicalRetry = 0; ; technicalRetry += 1) {
+        this.emitEvent({
+          event: "AI_GAME_GENERATION_ATTEMPT",
+          level: "info",
+          correlationId,
+          attempt: round,
+          round,
+          technicalRetry,
+          requestedQuestionCount: missingCount,
+          acceptedQuestionCount: accepted.length,
+        });
+        try {
+          raw = await this.generator.generate(genRequest);
+          applyCategoryIdentity(raw as GeneratedGameDraft, categoryId);
+          break;
+        } catch (error) {
+          const failure = classifyGenerationFailure(error);
+          this.emitFailure(round, correlationId, failure, technicalRetry);
+          const guardrailBlocked = failure.failureType === "guardrail_intervened"
+            || failure.failureType === "content_filtered";
+          if (guardrailBlocked) this.emitGuardrail(correlationId, round, missingCount, failure, technicalRetry);
+          const noContentFailure = guardrailBlocked
+            || failure.failureType === "provider_error"
+            || failure.failureType === "invalid_json"
+            || failure.failureType === "invalid_shape";
+          if (noContentFailure && technicalRetry < this.maxTechnicalRetriesPerRound) {
+            continue; // retry the SAME repair round
+          }
+          if (failure.failureType === "provider_error") {
+            // Transport error that also failed its retry: fail closed.
+            throw new ApplicationError("AI_GENERATION_FAILED", "AI game generation failed.");
+          }
+          // Guardrail / malformed persisted past the technical retry: this round
+          // yields no questions and is consumed (the loop stays bounded).
+          raw = undefined;
+          break;
         }
       }
+
+      // 1b) Defense in depth against an adapter that ignores the batch size.
+      //     The port contract is: a call for `missingCount` returns exactly
+      //     `missingCount` questions. A response of any other length (e.g. a
+      //     fixed batch of 10 for a 1-question repair) is rejected whole — never
+      //     silently trimmed — and the round is consumed. The real returned size
+      //     is still logged so the mismatch is visible in CloudWatch.
+      let unexpectedBatchCount: number | undefined;
+      if (raw !== undefined) {
+        const returnedCount = readQuestionsArray(raw).length;
+        if (returnedCount !== missingCount) {
+          unexpectedBatchCount = returnedCount;
+          this.emitFailure(round, correlationId, {
+            failureType: "validation_failed",
+            validationRule: "unexpected_question_count",
+          });
+          this.emitRejected(correlationId, round, { issueTypes: ["unexpected_question_count"] });
+          raw = undefined;
+        }
+      }
+
+      if (raw && !meta) meta = tryCaptureGameMeta(raw, request.difficulty);
+
+      // 2) Per-question structural validation + pool uniqueness.
+      const roundStructuralIssues: string[] = [];
+      const roundSemanticIssues: string[] = [];
+      const candidates: Question[] = [];
+      const roundTexts = new Set<string>();
+      let generatedCount = 0;
+      let structuralRejectedCount = 0;
+      for (const rawQuestion of readQuestionsArray(raw)) {
+        if (candidates.length >= missingCount) break;
+        generatedCount += 1;
+        let question: Question;
+        try {
+          question = normalizeQuestionShape(rawQuestion, candidates.length, request.difficulty, categoryId);
+        } catch (error) {
+          const rule = structuralRuleOf(error);
+          roundStructuralIssues.push(rule);
+          structuralRejectedCount += 1;
+          this.emitFailure(round, correlationId, classifyGenerationFailure(error));
+          this.emitRejected(correlationId, round, { issueTypes: [rule] });
+          continue;
+        }
+        if (acceptedTexts.has(question.text) || roundTexts.has(question.text)) {
+          roundStructuralIssues.push("duplicate_text");
+          structuralRejectedCount += 1;
+          this.emitFailure(round, correlationId, {
+            failureType: "validation_failed",
+            validationRule: "duplicate_text",
+            validationField: `questions[${candidates.length}].text`,
+          });
+          this.emitRejected(correlationId, round, { issueTypes: ["duplicate_text"] });
+          continue;
+        }
+        roundTexts.add(question.text);
+        candidates.push(question);
+      }
+
+      // 3) Nova Pro blind independent validation of the structurally-valid candidates.
+      let acceptedThisRound = 0;
+      let semanticRejectedCount = 0;
+      let semanticIssueCount = 0;
+      if (candidates.length > 0) {
+        let review: GameValidationResult;
+        try {
+          review = await this.validator.validate({
+            topic: request.topic,
+            difficulty: request.difficulty,
+            targetAge: request.targetAge,
+            draft: {
+              title: meta?.title ?? request.topic,
+              difficulty: request.difficulty,
+              category: meta?.category ?? { id: categoryId, name: request.topic, description: request.topic, icon: "❓" },
+              questions: candidates,
+            },
+          });
+        } catch (error) {
+          this.emitEvent({
+            event: "AI_GAME_VALIDATION_ERROR",
+            level: "error",
+            correlationId,
+            attempt: round,
+            round,
+            questionCount: candidates.length,
+          });
+          if (error instanceof GameValidatorError) {
+            throw new ApplicationError("AI_GENERATION_FAILED", "AI game validation failed.");
+          }
+          throw error;
+        }
+
+        const verdict = evaluateReview(candidates, review);
+        verdict.warningTypes.forEach((type) => warningTypes.add(type));
+        candidates.forEach((question, slot) => {
+          const failure = verdict.failures.find((entry) => entry.questionIndex === slot);
+          if (!failure) {
+            accepted.push(question);
+            acceptedTexts.add(question.text);
+            acceptedThisRound += 1;
+            return;
+          }
+          semanticRejectedCount += 1;
+          semanticIssueCount += failure.issueTypes.length;
+          roundSemanticIssues.push(...failure.issueTypes);
+          this.emitRejected(correlationId, round, {
+            questionIndex: slot,
+            issueTypes: failure.issueTypes,
+            generatorAnswerIndex: failure.generatorAnswerIndex,
+            validatorAnswerIndex: failure.validatorAnswerIndex,
+            confident: failure.confident,
+            ambiguous: failure.ambiguous,
+          });
+        });
+      }
+
+      // Distinct counters: `rejectedQuestionCount` counts QUESTIONS not issues;
+      // one rejected question can carry several issues, so issueCount >= it.
+      const rejectedQuestionCount = structuralRejectedCount + semanticRejectedCount;
+      const issueCount = roundStructuralIssues.length + semanticIssueCount;
+      this.emitEvent({
+        event: "AI_GAME_REPAIR_ROUND",
+        level: "info",
+        correlationId,
+        attempt: round,
+        round,
+        requestedQuestionCount: missingCount,
+        generatedCount: unexpectedBatchCount ?? generatedCount,
+        acceptedCount: acceptedThisRound,
+        rejectedQuestionCount,
+        issueCount,
+        acceptedQuestionCount: accepted.length,
+        missingCount: Math.max(0, questionCount - accepted.length),
+      });
+
+      if (accepted.length >= questionCount && meta) break;
+
+      previousIssues = [...roundStructuralIssues, ...roundSemanticIssues]
+        .slice(0, 10)
+        .map((type, index) => ({ questionIndex: index, type, reason: type }));
     }
-    throw new ApplicationError("AI_GENERATED_CONTENT_INVALID", "AI generated content did not satisfy the game rules.");
+
+    if (accepted.length < questionCount || !meta) {
+      const exhaustedRound = Math.min(round, this.maxRepairRounds);
+      this.emitEvent({
+        event: "AI_GAME_GENERATION_EXHAUSTED",
+        level: "warn",
+        correlationId,
+        attempt: exhaustedRound,
+        round: exhaustedRound,
+        acceptedQuestionCount: accepted.length,
+        missingCount: Math.max(0, questionCount - accepted.length),
+      });
+      throw new ApplicationError("AI_GENERATED_CONTENT_INVALID", "AI generated content did not pass validation.");
+    }
+
+    const questions = accepted.slice(0, questionCount).map((question, index) => reindexQuestion(question, index));
+    this.emitEvent({
+      event: "AI_GAME_VALIDATION_SUCCEEDED",
+      level: "info",
+      correlationId,
+      attempt: round,
+      round,
+      questionCount,
+      acceptedQuestionCount: questionCount,
+      ...(warningTypes.size > 0 ? { warningCount: warningTypes.size, warningTypes: [...warningTypes] } : {}),
+    });
+    return { title: meta.title, category: meta.category, questions };
+  }
+
+  private emitEvent(event: Omit<GenerationPipelineEvent, "maxAttempts" | "generatorModel" | "validatorModel">): void {
+    this.logEvent({
+      ...event,
+      maxAttempts: this.maxRepairRounds,
+      ...(this.models.generator ? { generatorModel: this.models.generator } : {}),
+      ...(this.models.validator ? { validatorModel: this.models.validator } : {}),
+    });
+  }
+
+  private emitRejected(
+    correlationId: string | undefined,
+    round: number,
+    detail: {
+      questionIndex?: number;
+      issueTypes: string[];
+      generatorAnswerIndex?: number;
+      validatorAnswerIndex?: number | null;
+      confident?: boolean;
+      ambiguous?: boolean;
+    },
+  ): void {
+    this.emitEvent({
+      event: "AI_GAME_VALIDATION_REJECTED",
+      level: "warn",
+      correlationId,
+      attempt: round,
+      round,
+      issueCount: 1,
+      ...detail,
+    });
   }
 
   private emitFailure(
     attempt: number,
     correlationId: string | undefined,
     failure: GeneratedGameCandidateFailure,
+    technicalRetry = 0,
   ): void {
+    const guardrail = summarizeGuardrail(failure.guardrail);
     this.logDiagnostic({
       event: "ai_generation_failure",
       level: "warn",
       ...(correlationId ? { correlationId } : {}),
       attempt,
+      ...(technicalRetry > 0 ? { technicalRetry } : {}),
       failureType: failure.failureType,
       ...(failure.validationRule ? { validationRule: failure.validationRule } : {}),
       ...(failure.validationField ? { validationField: failure.validationField } : {}),
       ...(failure.stopReason ? { stopReason: failure.stopReason } : {}),
+      ...(guardrail.policies.length > 0 ? { guardrailPolicies: guardrail.policies } : {}),
+      ...(guardrail.filterTypes.length > 0 ? { guardrailFilterTypes: guardrail.filterTypes } : {}),
+      ...(guardrail.actions.length > 0 ? { guardrailActions: guardrail.actions } : {}),
     });
   }
+
+  private emitGuardrail(
+    correlationId: string | undefined,
+    round: number,
+    requestedQuestionCount: number,
+    failure: GeneratedGameCandidateFailure,
+    technicalRetry: number,
+  ): void {
+    const guardrail = summarizeGuardrail(failure.guardrail);
+    this.emitEvent({
+      event: "AI_GAME_GUARDRAIL_INTERVENED",
+      level: "warn",
+      correlationId,
+      attempt: round,
+      round,
+      technicalRetry,
+      requestedQuestionCount,
+      ...(failure.stopReason ? { guardrailStopReason: failure.stopReason } : {}),
+      ...(failure.guardrail?.guardrailId ? { guardrailId: failure.guardrail.guardrailId } : {}),
+      ...(failure.guardrail?.guardrailVersion ? { guardrailVersion: failure.guardrail.guardrailVersion } : {}),
+      ...(guardrail.policies.length > 0 ? { guardrailPolicies: guardrail.policies } : {}),
+      ...(guardrail.filterTypes.length > 0 ? { guardrailFilterTypes: guardrail.filterTypes } : {}),
+      ...(guardrail.actions.length > 0 ? { guardrailActions: guardrail.actions } : {}),
+    });
+  }
+}
+
+function summarizeGuardrail(
+  guardrail: GeneratedGameCandidateFailure["guardrail"],
+): { policies: string[]; filterTypes: string[]; actions: string[] } {
+  const assessments = guardrail?.assessments ?? [];
+  return {
+    policies: [...new Set(assessments.map((entry) => entry.policy))],
+    filterTypes: [...new Set(assessments.map((entry) => entry.type))],
+    actions: [...new Set(assessments.map((entry) => entry.action))],
+  };
+}
+
+interface QuestionReviewFailure {
+  questionIndex: number;
+  generatorAnswerIndex: number;
+  validatorAnswerIndex: number | null;
+  confident: boolean;
+  ambiguous: boolean;
+  issueTypes: string[];
+  reason: string;
+}
+
+interface ReviewVerdict {
+  valid: boolean;
+  failures: QuestionReviewFailure[];
+  gameIssueTypes: string[];
+  /** Non-blocking quality observations. Do not affect `valid`. */
+  warningTypes: string[];
+}
+
+/** Blocking severity is decided by the issue CODE, never by the model's own claim. */
+function isBlocking(issue: GameValidationIssue): boolean {
+  return issueSeverity(issue.type) === "error";
+}
+
+/**
+ * The deterministic per-candidate verdict. For each candidate the reviewer's
+ * INDEPENDENT answer must exist, be confident, non-ambiguous, free of
+ * ERROR-severity issues, and equal to the answer the generator marked correct.
+ * WARNING-severity issues (weak/easy distractors, difficulty feel) never
+ * invalidate a question. `failures[].questionIndex` is the candidate's slot.
+ */
+function evaluateReview(candidates: readonly Question[], review: GameValidationResult): ReviewVerdict {
+  const reviewByIndex = new Map(review.questions.map((question) => [question.questionIndex, question]));
+  const failures: QuestionReviewFailure[] = [];
+  const warningTypes = new Set<string>();
+
+  candidates.forEach((question, index) => {
+    const generatorAnswerIndex = question.answers.findIndex((answer) => answer.isCorrect);
+    const result = reviewByIndex.get(index);
+    if (!result) {
+      failures.push({
+        questionIndex: index,
+        generatorAnswerIndex,
+        validatorAnswerIndex: null,
+        confident: false,
+        ambiguous: false,
+        issueTypes: ["FACTUAL_UNCERTAINTY"],
+        reason: "the reviewer returned no result for this question",
+      });
+      return;
+    }
+
+    for (const issue of result.issues) {
+      if (!isBlocking(issue)) warningTypes.add(issue.type);
+    }
+    const blockingIssueTypes = result.issues
+      .filter((issue) => isBlocking(issue))
+      .map((issue) => issue.type);
+
+    const answerIndex = result.answerIndex;
+    const inRange = answerIndex !== null && answerIndex >= 0 && answerIndex < question.answers.length;
+    const matches = inRange && answerIndex === generatorAnswerIndex;
+    const questionValid = result.confident === true
+      && result.ambiguous === false
+      && answerIndex !== null
+      && inRange
+      && matches
+      && blockingIssueTypes.length === 0;
+    if (questionValid) return;
+
+    const issueTypes = [...new Set<string>([
+      ...blockingIssueTypes,
+      ...(answerIndex === null ? ["FACTUAL_UNCERTAINTY"] : []),
+      ...(!result.confident ? ["FACTUAL_UNCERTAINTY"] : []),
+      ...(result.ambiguous ? ["AMBIGUOUS_QUESTION"] : []),
+      ...(answerIndex !== null && !inRange ? ["INVALID_OPTIONS"] : []),
+      ...(answerIndex !== null && inRange && !matches ? ["ANSWER_MISMATCH"] : []),
+    ])];
+    failures.push({
+      questionIndex: index,
+      generatorAnswerIndex,
+      validatorAnswerIndex: answerIndex,
+      confident: result.confident,
+      ambiguous: result.ambiguous,
+      issueTypes: issueTypes.length > 0 ? issueTypes : ["FACTUAL_UNCERTAINTY"],
+      reason: issueTypes.join(", ") || "reviewer rejected this question",
+    });
+  });
+
+  for (const issue of review.issues) {
+    if (!isBlocking(issue)) warningTypes.add(issue.type);
+  }
+  const gameIssueTypes = [...new Set(
+    review.issues.filter((issue) => isBlocking(issue)).map((issue) => issue.type),
+  )];
+
+  return {
+    valid: failures.length === 0 && gameIssueTypes.length === 0,
+    failures,
+    gameIssueTypes,
+    warningTypes: [...warningTypes],
+  };
 }
 
 function classifyGenerationFailure(error: unknown): GeneratedGameCandidateFailure {
@@ -241,30 +733,48 @@ function isValidAge(age: unknown): age is number {
   return typeof age === "number" && Number.isInteger(age) && age > 0;
 }
 
-function validateAndNormalizeDraft(
-  value: GeneratedGameDraft,
-  request: GenerateGameRequest,
-): GeneratedGameDraft {
-  if (!value || typeof value !== "object") invalidCandidate("missing_required_field");
-  const draft = value as Partial<GeneratedGameDraft>;
-  const title = requiredText(draft.title, "title", 100);
-  const category = normalizeCategory(draft.category);
-  if (draft.difficulty !== request.difficulty) invalidCandidate("difficulty_mismatch", "difficulty");
-  if (!Array.isArray(draft.questions)) invalidCandidate("missing_required_field", "questions");
-  if (draft.questions.length !== questionCount) invalidCandidate("question_count", "questions");
+function positiveRounds(value: unknown): number | undefined {
+  return Number.isInteger(value) && (value as number) > 0 ? (value as number) : undefined;
+}
 
-  const questionIds = new Set<string>();
-  const questionTexts = new Set<string>();
-  const questions = draft.questions.map((question, index) => normalizeQuestion(
-    question,
-    index,
-    request.difficulty,
-    category.id,
-    questionIds,
-    questionTexts,
-  ));
+function nonNegativeInt(value: unknown): number | undefined {
+  return Number.isInteger(value) && (value as number) >= 0 ? (value as number) : undefined;
+}
 
-  return { title, category, difficulty: request.difficulty, questions };
+/** The draft-level metadata, or `undefined` when the response cannot supply it yet. */
+function tryCaptureGameMeta(
+  raw: unknown,
+  difficulty: Difficulty,
+): { title: string; category: Category } | undefined {
+  try {
+    const loose = raw as { title?: unknown; category?: unknown; difficulty?: unknown };
+    if (loose.difficulty !== undefined && loose.difficulty !== difficulty) return undefined;
+    return { title: requiredText(loose.title, "title", 100), category: normalizeCategory(loose.category) };
+  } catch {
+    return undefined;
+  }
+}
+
+/** The raw question list, or `[]` for a response that cannot be mapped into questions. */
+function readQuestionsArray(raw: unknown): unknown[] {
+  const loose = raw as { questions?: unknown } | undefined;
+  return loose && Array.isArray(loose.questions) ? loose.questions : [];
+}
+
+function structuralRuleOf(error: unknown): string {
+  return error instanceof InvalidGeneratedGameCandidateError
+    ? (error.failure.validationRule ?? "malformed_question")
+    : "malformed_question";
+}
+
+/** Application owns question/answer identity; reassign stable ids to the final set. */
+function reindexQuestion(question: Question, index: number): Question {
+  const id = `q${index + 1}`;
+  return {
+    ...question,
+    id,
+    answers: question.answers.map((answer, answerIndex) => ({ ...answer, id: `${id}a${answerIndex + 1}` })),
+  };
 }
 
 function normalizeCategory(value: unknown): Category {
@@ -278,19 +788,25 @@ function normalizeCategory(value: unknown): Category {
   };
 }
 
-function normalizeQuestion(
+/**
+ * Per-question structural validation. Throws `InvalidGeneratedGameCandidateError`
+ * for THIS question only (malformed shape, wrong option count, no/many correct
+ * answers, duplicate answer text, over-length fields, wrong difficulty/category).
+ * Cross-question / cross-round uniqueness of question text is enforced by the
+ * caller against the accepted pool; question and answer ids are reassigned by
+ * Application on final assembly, so id collisions across rounds are irrelevant.
+ */
+function normalizeQuestionShape(
   value: unknown,
   index: number,
   difficulty: Difficulty,
   categoryId: string,
-  questionIds: Set<string>,
-  questionTexts: Set<string>,
 ): Question {
   const field = `questions[${index}]`;
   if (!value || typeof value !== "object") invalidCandidate("missing_required_field", field);
   const question = value as Partial<Question>;
-  const id = uniqueText(question.id, questionIds, "duplicate_question_id", `${field}.id`, generatedFieldLimits.questionId);
-  const text = uniqueText(question.text, questionTexts, "duplicate_text", `${field}.text`, 240);
+  const id = requiredText(question.id, `${field}.id`, generatedFieldLimits.questionId);
+  const text = requiredText(question.text, `${field}.text`, 240);
   if (requiredText(question.categoryId, `${field}.categoryId`) !== categoryId) {
     invalidCandidate("category_mismatch", `${field}.categoryId`);
   }

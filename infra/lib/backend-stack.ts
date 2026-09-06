@@ -17,7 +17,8 @@ const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 
 export interface FamilyLearningGamesBackendStackProps extends StackProps {
   aiGameGenerationEnabled?: boolean;
-  bedrockModelId?: string;
+  bedrockGeneratorModelId?: string;
+  bedrockValidatorModelId?: string;
   generationThrottleRateLimit?: number;
   generationThrottleBurstLimit?: number;
   allowedOrigins?: string[];
@@ -37,8 +38,10 @@ export class FamilyLearningGamesBackendStack extends Stack {
     const environment = this.node.tryGetContext("environment") ?? "dev";
     const aiGameGenerationEnabled = props?.aiGameGenerationEnabled
       ?? readBooleanContext(this.node.tryGetContext("aiGameGenerationEnabled"), "aiGameGenerationEnabled", false);
-    const bedrockModelId = props?.bedrockModelId
-      ?? readStringContext(this.node.tryGetContext("bedrockModelId"), "amazon.nova-micro-v1:0");
+    const bedrockGeneratorModelId = props?.bedrockGeneratorModelId
+      ?? readStringContext(this.node.tryGetContext("bedrockGeneratorModelId"), "amazon.nova-lite-v1:0");
+    const bedrockValidatorModelId = props?.bedrockValidatorModelId
+      ?? readStringContext(this.node.tryGetContext("bedrockValidatorModelId"), "amazon.nova-pro-v1:0");
     const generationThrottleRateLimit = readPositiveNumber(
       props?.generationThrottleRateLimit ?? this.node.tryGetContext("generationThrottleRateLimit") ?? 1,
       "generationThrottleRateLimit",
@@ -92,7 +95,8 @@ export class FamilyLearningGamesBackendStack extends Stack {
           description: `policy-sha256:${policyFingerprint}`,
         },
       );
-      backendEnvironment.BEDROCK_MODEL_ID = bedrockModelId;
+      backendEnvironment.BEDROCK_GENERATOR_MODEL_ID = bedrockGeneratorModelId;
+      backendEnvironment.BEDROCK_VALIDATOR_MODEL_ID = bedrockValidatorModelId;
       backendEnvironment.BEDROCK_REGION = this.region;
       backendEnvironment.BEDROCK_GUARDRAIL_ID = guardrail.attrGuardrailId;
       backendEnvironment.BEDROCK_GUARDRAIL_VERSION = guardrailVersion.attrVersion;
@@ -133,13 +137,13 @@ export class FamilyLearningGamesBackendStack extends Stack {
       backend.addToRolePolicy(new PolicyStatement({
         effect: Effect.ALLOW,
         actions: ["bedrock:InvokeModel"],
-        resources: [this.formatArn({
+        resources: [bedrockGeneratorModelId, bedrockValidatorModelId].map((modelId) => this.formatArn({
           service: "bedrock",
           region: this.region,
           account: "",
           resource: "foundation-model",
-          resourceName: bedrockModelId,
-        })],
+          resourceName: modelId,
+        })),
       }));
       backend.addToRolePolicy(new PolicyStatement({
         effect: Effect.ALLOW,

@@ -83,7 +83,8 @@ test("provisions one guarded Bedrock integration with scoped IAM when enabled by
     Environment: {
       Variables: Match.objectLike({
         AI_GAME_GENERATION_ENABLED: "true",
-        BEDROCK_MODEL_ID: "amazon.nova-micro-v1:0",
+        BEDROCK_GENERATOR_MODEL_ID: "amazon.nova-lite-v1:0",
+        BEDROCK_VALIDATOR_MODEL_ID: "amazon.nova-pro-v1:0",
         BEDROCK_REGION: "us-east-1",
         BEDROCK_GUARDRAIL_ID: Match.anyValue(),
         BEDROCK_GUARDRAIL_VERSION: Match.anyValue(),
@@ -138,7 +139,9 @@ test("provisions one guarded Bedrock integration with scoped IAM when enabled by
 
   const synthesized = JSON.stringify(template.toJSON());
   assert.match(synthesized, /bedrock:InvokeModel/);
-  assert.match(synthesized, /foundation-model\/amazon\.nova-micro-v1:0/);
+  assert.match(synthesized, /foundation-model\/amazon\.nova-lite-v1:0/);
+  assert.match(synthesized, /foundation-model\/amazon\.nova-pro-v1:0/);
+  assert.doesNotMatch(synthesized, /amazon\.nova-micro-v1:0/);
   assert.match(synthesized, /bedrock:ApplyGuardrail/);
   assert.match(synthesized, /dynamodb:PutItem/);
   assert.doesNotMatch(synthesized, /"Action":"bedrock:\*"/);

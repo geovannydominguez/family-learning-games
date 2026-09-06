@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 
+import type { GenerateGameRequest } from "../../application/game/GameGenerator.ts";
 import { InvalidGeneratedGameCandidateError } from "../../application/game/GameGenerator.ts";
+import { guardedText, trustedTextBlocks } from "./bedrockConverse.ts";
 import {
   BedrockGameGenerator,
   BedrockGameGeneratorError,
@@ -11,13 +14,33 @@ import {
 
 const request = { topic: "dinosaurs", difficulty: "easy" as const, questionCount: 10, targetAge: 4 };
 
-function validPayload(extra: Record<string, unknown> = {}): Record<string, unknown> {
+function questionList(count: number): Array<Record<string, unknown>> {
+  return Array.from({ length: count }, (_unused, index) => ({
+    id: `q${index + 1}`,
+    categoryId: "dinosaurs",
+    difficulty: "easy",
+    text: `Dinosaur question ${index + 1}`,
+    answers: [
+      { id: `q${index + 1}a1`, text: "A", isCorrect: true },
+      { id: `q${index + 1}a2`, text: "B", isCorrect: false },
+      { id: `q${index + 1}a3`, text: "C", isCorrect: false },
+      { id: `q${index + 1}a4`, text: "D", isCorrect: false },
+    ],
+  }));
+}
+
+/**
+ * A structurally complete generator response. `questionCount` MUST match the
+ * batch size the generator was asked for — the parser now rejects any other
+ * length as `unexpected_question_count`.
+ */
+function validPayload(questionCount = 10, extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     gameId: "provider-controlled-id",
     title: "Dinosaur quiz",
     difficulty: "easy",
     category: { id: "dinosaurs", name: "Dinosaurs", description: "Learn", icon: "🦕" },
-    questions: [],
+    questions: questionList(questionCount),
     ...extra,
   };
 }
@@ -63,13 +86,23 @@ test("maps the request to guarded deterministic Converse configuration and a chi
   assert.deepEqual(input.guardrailConfig, {
     guardrailIdentifier: "guardrail-id",
     guardrailVersion: "7",
+    trace: "enabled",
   });
   assert.equal(input.messages?.[0].role, "user");
-  assert.deepEqual(JSON.parse(input.messages?.[0].content?.[0].text ?? ""), {
-    topic: "dinosaurs",
-    difficulty: "easy",
-    questionCount: 10,
+  // Trust boundary: ONLY the user-provided topic is inside a guardContent block.
+  assert.deepEqual(guardedText(input.messages?.[0].content), ["dinosaurs"]);
+  assert.deepEqual(input.messages?.[0].content?.[0], {
+    guardContent: { text: { text: "dinosaurs", qualifiers: ["guard_content"] } },
   });
+  // Application-owned request settings are plain (unguarded) text, not guardContent.
+  const trusted = trustedTextBlocks(input.messages?.[0].content);
+  assert.ok(trusted.some((block) => {
+    try {
+      return JSON.stringify(JSON.parse(block)) === JSON.stringify({ difficulty: "easy", questionCount: 10 });
+    } catch {
+      return false;
+    }
+  }), "expected an unguarded {difficulty, questionCount} settings block");
 
   const prompt = input.system?.[0].text ?? "";
   for (const required of [
@@ -186,6 +219,51 @@ test("checks guardrail and content filtering stop reasons before parsing", async
   }
 });
 
+test("surfaces a content-free guardrail assessment from the Converse trace", async () => {
+  const generator = new BedrockGameGenerator({ send: async () => ({
+    stopReason: "guardrail_intervened",
+    output: { message: { content: [{ text: "blocked" }] } },
+    trace: {
+      guardrail: {
+        modelOutput: ["the raw blocked model text that must never be logged"],
+        inputAssessment: {
+          "gr-123": {
+            contentPolicy: {
+              filters: [
+                { type: "PROMPT_ATTACK", confidence: "HIGH", filterStrength: "HIGH", action: "BLOCKED" },
+                { type: "VIOLENCE", confidence: "LOW", action: "NONE" },
+              ],
+            },
+            sensitiveInformationPolicy: {
+              piiEntities: [{ match: "someone@example.com", type: "EMAIL", action: "BLOCKED" }],
+            },
+            wordPolicy: { customWords: [{ match: "a blocked word", action: "BLOCKED" }] },
+          },
+        },
+      },
+    },
+  }) }, { modelId: "model", guardrailIdentifier: "gr-123", guardrailVersion: "4" });
+
+  await assert.rejects(generator.generate(request), (error: unknown) => {
+    assert.ok(error instanceof InvalidGeneratedGameCandidateError);
+    assert.equal(error.failure.failureType, "guardrail_intervened");
+    assert.equal(error.failure.guardrail?.guardrailId, "gr-123");
+    assert.equal(error.failure.guardrail?.guardrailVersion, "4");
+    const assessments = error.failure.guardrail?.assessments ?? [];
+    assert.deepEqual(assessments, [
+      { policy: "contentPolicy", type: "PROMPT_ATTACK", action: "BLOCKED", confidence: "HIGH" },
+      { policy: "contentPolicy", type: "VIOLENCE", action: "NONE", confidence: "LOW" },
+      { policy: "sensitiveInformationPolicy", type: "EMAIL", action: "BLOCKED" },
+      { policy: "wordPolicy", type: "CUSTOM_WORD", action: "BLOCKED" },
+    ]);
+    const serialized = JSON.stringify(error);
+    assert.equal(serialized.includes("someone@example.com"), false);
+    assert.equal(serialized.includes("a blocked word"), false);
+    assert.equal(serialized.includes("raw blocked model text"), false);
+    return true;
+  });
+});
+
 test("tags invalid candidates with a safe internal failure type and stop reason only", async () => {
   const scenarios: Array<{ response: object; failureType: string; stopReason?: string }> = [
     {
@@ -289,12 +367,12 @@ test("system prompt states every required field, the slug/emoji rules, and a coh
     for (const answer of question.answers) assert.equal(typeof answer.isCorrect, "boolean");
   }
 
-  // The user message is unchanged: still exactly { topic, difficulty, questionCount }.
-  assert.deepEqual(JSON.parse(commands[0].input.messages?.[0].content?.[0].text ?? ""), {
-    topic: "dinosaurs",
-    difficulty: "easy",
-    questionCount: 10,
-  });
+  // The topic is the only guarded (untrusted) content; the settings ride along
+  // as unguarded application text.
+  assert.deepEqual(guardedText(commands[0].input.messages?.[0].content), ["dinosaurs"]);
+  assert.ok(trustedTextBlocks(commands[0].input.messages?.[0].content).includes(
+    JSON.stringify({ difficulty: "easy", questionCount: 10 }),
+  ));
 });
 
 test("system prompt requires meaningful intra-game diversity across the 10 questions", async () => {
@@ -359,6 +437,275 @@ test("system prompt forbids duplicate question and answer texts and asks for a p
   const marker = "exactly 10 questions:\n";
   const exampleLine = prompt.slice(prompt.indexOf(marker) + marker.length).split("\n")[0];
   assert.equal((JSON.parse(exampleLine) as { questions: unknown[] }).questions.length, 2);
+});
+
+test("a repair request stays minimal: fewer questions, dedup list, issue codes, no injection phrasing", async () => {
+  const commands: ConverseCommand[] = [];
+  const generator = new BedrockGameGenerator({ send: async (command: ConverseCommand) => {
+    commands.push(command);
+    return textResponse(JSON.stringify(validPayload(2)));
+  } }, { modelId: "model", guardrailIdentifier: "guardrail", guardrailVersion: "1" });
+
+  await generator.generate({
+    topic: "Pokémon",
+    difficulty: "easy",
+    questionCount: 2,
+    targetAge: 6,
+    existingQuestions: ["¿Cuál Pokémon es eléctrico?", "¿Cuántas patas tiene un Caterpie?"],
+    previousIssues: [
+      { questionIndex: 0, type: "ANSWER_MISMATCH", reason: "the reviewer thinks the marked answer of Pikachu is wrong because…" },
+      { questionIndex: 1, type: "AMBIGUOUS_QUESTION", reason: "arbitrary free-form validator explanation with detail" },
+      { questionIndex: 2, type: "not a real code, free text", reason: "junk" },
+    ],
+  });
+
+  const content = commands[0].input.messages?.[0].content ?? [];
+  // Trust boundary: only the topic is guarded; every repair directive is unguarded.
+  assert.deepEqual(guardedText(content), ["Pokémon"]);
+  assert.ok(trustedTextBlocks(content).includes(
+    JSON.stringify({ difficulty: "easy", questionCount: 2 }),
+  ));
+  const blocks = trustedTextBlocks(content).join("\n");
+
+  assert.ok(blocks.includes("this request is ONLY for 2 replacement questions"));
+  assert.ok(blocks.includes("Return a \"questions\" array with exactly 2 questions — not 10"));
+  assert.ok(blocks.includes("Do not repeat or paraphrase any of them"));
+  assert.ok(blocks.includes("¿Cuál Pokémon es eléctrico?")); // accepted question texts, for de-dup only
+  assert.ok(blocks.includes("- ANSWER_MISMATCH"));
+  assert.ok(blocks.includes("- AMBIGUOUS_QUESTION"));
+
+  // The repair directives must NOT be inside guardContent — that is the bug fix.
+  const guarded = guardedText(content).join("\n");
+  assert.equal(guarded.includes("replacement question"), false);
+  assert.equal(guarded.includes("Do not repeat or paraphrase"), false);
+  assert.equal(guarded.includes("ANSWER_MISMATCH"), false);
+
+  // no instruction-override / reviewer / free-form-reason phrasing
+  assert.equal(/ignore the/i.test(blocks), false);
+  assert.equal(blocks.includes("This is a repair request"), false);
+  assert.equal(/reviewer|rejected by|completely new game/i.test(blocks), false);
+  assert.equal(blocks.includes("the reviewer thinks the marked answer"), false);
+  assert.equal(blocks.includes("arbitrary free-form validator explanation"), false);
+  assert.equal(blocks.includes("not a real code"), false); // malformed codes are dropped
+
+  // guardrail trace requested so interventions can be diagnosed
+  assert.equal((commands[0].input.guardrailConfig as { trace?: string }).trace, "enabled");
+  // the system prompt asks for the batch size of THIS call, not a fixed 10
+  assert.ok((commands[0].input.system?.[0].text ?? "").includes("Return exactly 2 questions"));
+  assert.equal((commands[0].input.system?.[0].text ?? "").includes("Return exactly 10 questions"), false);
+});
+
+test("a repair request never sends answer options or correct-answer metadata for accepted questions", async () => {
+  const commands: ConverseCommand[] = [];
+  const generator = new BedrockGameGenerator({ send: async (command: ConverseCommand) => {
+    commands.push(command);
+    return textResponse(JSON.stringify(validPayload(3)));
+  } }, { modelId: "model", guardrailIdentifier: "guardrail", guardrailVersion: "1" });
+
+  await generator.generate({
+    topic: "Pokémon",
+    difficulty: "easy",
+    questionCount: 3,
+    targetAge: 6,
+    existingQuestions: ["¿De qué tipo es Bulbasaur?", "¿Cuántos ojos tiene un Magikarp?"],
+  });
+
+  const payload = (commands[0].input.messages?.[0].content ?? []).map((block) => block.text ?? "").join("\n");
+  for (const forbidden of ["isCorrect", "correctAnswer", "correctAnswerIndex", "answers\":", "\"options\""]) {
+    assert.equal(payload.includes(forbidden), false, `repair prompt leaked "${forbidden}"`);
+  }
+  assert.ok(payload.includes("¿De qué tipo es Bulbasaur?"));
+});
+
+test("a first-round request (10 questions) adds no repair blocks", async () => {
+  const commands: ConverseCommand[] = [];
+  const generator = new BedrockGameGenerator({ send: async (command: ConverseCommand) => {
+    commands.push(command);
+    return textResponse(JSON.stringify(validPayload()));
+  } }, { modelId: "model", guardrailIdentifier: "guardrail", guardrailVersion: "1" });
+
+  await generator.generate(request);
+
+  const content = commands[0].input.messages?.[0].content ?? [];
+  // guardContent(topic) + framing line + settings JSON — and nothing else.
+  assert.deepEqual(guardedText(content), ["dinosaurs"]);
+  const trusted = trustedTextBlocks(content);
+  assert.equal(trusted.length, 2);
+  assert.ok(trusted.includes(JSON.stringify({ difficulty: "easy", questionCount: 10 })));
+  const joined = trusted.join("\n");
+  for (const repairPhrase of ["replacement question", "already in the quiz", "Avoid these problem types"]) {
+    assert.equal(joined.includes(repairPhrase), false, `first round leaked repair phrase: ${repairPhrase}`);
+  }
+});
+
+test("the batch size drives both the prompt and the parser for 10, 5, and 1 questions", async () => {
+  for (const questionCount of [10, 5, 1]) {
+    const commands: ConverseCommand[] = [];
+    const generator = new BedrockGameGenerator({ send: async (command: ConverseCommand) => {
+      commands.push(command);
+      return textResponse(JSON.stringify(validPayload(questionCount)));
+    } }, { modelId: "model", guardrailIdentifier: "guardrail", guardrailVersion: "1" });
+
+    const draft = await generator.generate({ topic: "dinosaurs", difficulty: "easy", questionCount, targetAge: 6 });
+
+    // The system prompt asks for exactly this batch size, never a fixed 10.
+    const prompt = commands[0].input.system?.[0].text ?? "";
+    const phrase = questionCount === 1 ? "1 question" : `${questionCount} questions`;
+    assert.ok(prompt.includes(`Return exactly ${phrase}`), `prompt should request "${phrase}"`);
+    assert.ok(prompt.includes(`must contain exactly ${questionCount} `));
+    if (questionCount !== 10) {
+      assert.equal(prompt.includes("exactly 10 questions"), false, "no fixed-10 language leaks into a repair prompt");
+    }
+    // The trust boundary is identical for every batch size: topic guarded,
+    // settings unguarded, and the settings carry the requested count verbatim.
+    const content = commands[0].input.messages?.[0].content;
+    assert.deepEqual(guardedText(content), ["dinosaurs"]);
+    assert.ok(trustedTextBlocks(content).includes(
+      JSON.stringify({ difficulty: "easy", questionCount }),
+    ));
+    // The parser accepts a response whose length equals the requested count.
+    assert.equal(draft.questions.length, questionCount);
+  }
+});
+
+test("the parser rejects a fixed batch of 10 when only 1 replacement question was requested", async () => {
+  const generator = new BedrockGameGenerator({
+    send: async () => textResponse(JSON.stringify(validPayload(10))),
+  }, { modelId: "model", guardrailIdentifier: "guardrail", guardrailVersion: "1" });
+
+  await assert.rejects(
+    generator.generate({ topic: "dinosaurs", difficulty: "easy", questionCount: 1, targetAge: 6 }),
+    (error: unknown) => {
+      assert.ok(error instanceof InvalidGeneratedGameCandidateError);
+      assert.equal(error.failure.failureType, "validation_failed");
+      assert.equal(error.failure.validationRule, "unexpected_question_count");
+      return true;
+    },
+  );
+});
+
+test("the parser rejects an under-sized batch too (2 returned for a 5-question request)", async () => {
+  const generator = new BedrockGameGenerator({
+    send: async () => textResponse(JSON.stringify(validPayload(2))),
+  }, { modelId: "model", guardrailIdentifier: "guardrail", guardrailVersion: "1" });
+
+  await assert.rejects(
+    generator.generate({ topic: "dinosaurs", difficulty: "easy", questionCount: 5, targetAge: 6 }),
+    (error: unknown) => error instanceof InvalidGeneratedGameCandidateError
+      && error.failure.validationRule === "unexpected_question_count",
+  );
+});
+
+test("no hardcoded generation batch count remains in the generator source", async () => {
+  const source = await readFile(new URL("./BedrockGameGenerator.ts", import.meta.url), "utf8");
+  // The only literal 10 that may remain is `finalGameQuestionCount`, the FINAL
+  // game size used to phrase the repair contrast ("...but this request is only
+  // for N..."). Nothing may pin the generated batch to 10.
+  assert.equal(/questions\.length === 10\b/.test(source), false);
+  assert.equal(/questionCount = 10\b/.test(source), false);
+  assert.match(source, /const finalGameQuestionCount = 10;/);
+  assert.match(source, /buildSystemPrompt\(request\.questionCount\)/);
+  assert.match(source, /parseResponse\(response, this\.config, request\.questionCount\)/);
+});
+
+// --- Guardrail trust boundary: only untrusted user input is guardrail-evaluated ---
+
+function captureGenerate(overrides: Partial<GenerateGameRequest> = {}) {
+  const commands: ConverseCommand[] = [];
+  const generator = new BedrockGameGenerator({ send: async (command: ConverseCommand) => {
+    commands.push(command);
+    return textResponse(JSON.stringify(validPayload(overrides.questionCount ?? request.questionCount)));
+  } }, { modelId: "model", guardrailIdentifier: "guardrail", guardrailVersion: "3" });
+  return { commands, run: () => generator.generate({ ...request, ...overrides }) };
+}
+
+test("A. application-owned repair instructions are NOT inside guardContent", async () => {
+  const { commands, run } = captureGenerate({
+    topic: "Pokémon",
+    questionCount: 6,
+    existingQuestions: ["¿Cuál Pokémon es de tipo fuego?"],
+    previousIssues: [{ questionIndex: 0, type: "ANSWER_MISMATCH", reason: "x" }],
+  });
+  await run();
+
+  const guarded = guardedText(commands[0].input.messages?.[0].content).join("\n");
+  for (const appDirective of [
+    "replacement question",
+    "Return a \"questions\" array with exactly",
+    "Do not repeat or paraphrase any of them",
+    "¿Cuál Pokémon es de tipo fuego?",
+    "Avoid these problem types",
+    "ANSWER_MISMATCH",
+    "difficulty",
+    "questionCount",
+  ]) {
+    assert.equal(guarded.includes(appDirective), false, `guardContent leaked application directive: ${appDirective}`);
+  }
+});
+
+test("B. the user-controlled topic IS the guardContent, and it is the only guarded block", async () => {
+  const { commands, run } = captureGenerate({ topic: "Pokémon", questionCount: 6 });
+  await run();
+
+  assert.deepEqual(guardedText(commands[0].input.messages?.[0].content), ["Pokémon"]);
+  assert.deepEqual(commands[0].input.messages?.[0].content?.[0], {
+    guardContent: { text: { text: "Pokémon", qualifiers: ["guard_content"] } },
+  });
+});
+
+test("C. initial and repair generation apply the identical trust boundary", async () => {
+  const initial = captureGenerate({ topic: "Space", questionCount: 10 });
+  await initial.run();
+  const repair = captureGenerate({
+    topic: "Space",
+    questionCount: 6,
+    existingQuestions: ["Q kept 1", "Q kept 2"],
+    previousIssues: [{ questionIndex: 0, type: "OFF_TOPIC", reason: "y" }],
+  });
+  await repair.run();
+
+  for (const commands of [initial.commands, repair.commands]) {
+    const content = commands[0].input.messages?.[0].content;
+    // topic guarded, exactly one guarded block, settings unguarded
+    assert.deepEqual(guardedText(content), ["Space"]);
+    assert.equal(
+      (content ?? []).filter((block) => "guardContent" in (block as object)).length,
+      1,
+    );
+    assert.ok(trustedTextBlocks(content).some((block) => block.includes("\"questionCount\"")));
+  }
+});
+
+test("D. the Guardrail stays fully enabled (id, version, trace) for every round", async () => {
+  for (const questionCount of [10, 6, 1]) {
+    const { commands, run } = captureGenerate({ topic: "Animales", questionCount });
+    await run();
+    assert.deepEqual(commands[0].input.guardrailConfig, {
+      guardrailIdentifier: "guardrail",
+      guardrailVersion: "3",
+      trace: "enabled",
+    });
+  }
+});
+
+test("E. a repair request for questionCount=6 does not mark the whole repair prompt as guarded", async () => {
+  const { commands, run } = captureGenerate({
+    topic: "Pokémon",
+    questionCount: 6,
+    existingQuestions: ["A", "B", "C"],
+    previousIssues: [
+      { questionIndex: 0, type: "ANSWER_MISMATCH", reason: "r" },
+      { questionIndex: 1, type: "AMBIGUOUS_QUESTION", reason: "r" },
+    ],
+  });
+  await run();
+
+  const content = commands[0].input.messages?.[0].content ?? [];
+  const guardedChars = guardedText(content).join("").length;
+  const trustedChars = trustedTextBlocks(content).join("").length;
+  // The guarded portion is just the topic; the bulk of the prompt is trusted.
+  assert.equal(guardedText(content).join(""), "Pokémon");
+  assert.ok(trustedChars > guardedChars * 5, "the repair directives must dominate the UNGUARDED portion");
 });
 
 test("sanitizes technical SDK failures without retaining provider details", async () => {

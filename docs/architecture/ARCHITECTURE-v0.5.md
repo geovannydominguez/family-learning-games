@@ -446,14 +446,75 @@ Se preserva la configuración:
 ```text
 AI_GAME_GENERATION_ENABLED
 
-BEDROCK_MODEL_ID
+BEDROCK_GENERATOR_MODEL_ID   # amazon.nova-lite-v1:0   (drafting)
+BEDROCK_VALIDATOR_MODEL_ID   # amazon.nova-pro-v1:0    (independent review)
 BEDROCK_REGION
 
 BEDROCK_GUARDRAIL_ID
 BEDROCK_GUARDRAIL_VERSION
 ```
 
-El modelo concreto continuará siendo configuración.
+Los modelos concretos continúan siendo configuración. Desde ADR-011 la
+generación IA usa un pipeline de dos modelos: el generador (`amazon.nova-lite-v1:0`
+desde la Revisión 7 de ADR-011 — antes `amazon.nova-micro-v1:0`, cambiado por
+calidad de borrador; sólo configuración, sin cambio de arquitectura) genera el
+borrador y Nova Pro resuelve cada pregunta **de forma independiente y a ciegas** —
+no se le envía cuál opción marcó el generador. Application compara
+determinísticamente la respuesta de Nova Pro con la del generador (y exige
+`confident`, no `ambiguous`,
+sin issues **de severidad `error`**); una discrepancia rechaza esa pregunta. El
+LLM no decide la persistencia. Los reintentos son **rondas de reparación a nivel
+de pregunta** (no regeneración del borrador completo): las preguntas válidas se
+conservan y sólo se vuelven a pedir los huecos fallidos —enviando su texto como
+`existingQuestions` para evitar duplicados—, hasta `MAX_REPAIR_ROUNDS = 5`. Se
+separan las **rondas de contenido** de los **reintentos técnicos**: un fallo que
+no produce candidatos (bloqueo del Guardrail, error de transporte, respuesta
+malformada) obtiene primero un reintento acotado de la MISMA ronda
+(`MAX_TECHNICAL_RETRIES_PER_ROUND = 1`) — sólo consume la ronda si persiste; un
+`provider_error` que también falla su reintento falla cerrado (502).
+`GameRepository.create` se llama una sola vez, sólo cuando existen 10 preguntas
+únicas válidas; si se agotan las rondas → `AI_GENERATED_CONTENT_INVALID` / HTTP
+422 / repositorio = 0. El **tamaño del lote** de generación es autoritativo y
+distinto del tamaño final: `GenerateGameRequest.questionCount` es cuántas
+preguntas debe devolver **esta llamada** — 10 en la primera ronda, `missingCount`
+(1..9) en una reparación — nunca el 10 fijo del juego final. El prompt pide ese
+conteo (una reparación dice "el juego final tiene 10 preguntas, pero esta
+petición es sólo para N de reemplazo — devuelve exactamente N"), el parser de
+`BedrockGameGenerator` valida la longitud contra el conteo pedido y rechaza
+cualquier otra como `unexpected_question_count`, y `GenerateGameService`
+re-verifica la longitud del lote antes de tocar los candidatos: un lote de más
+(p. ej. 10 fijas para una reparación de 1) se rechaza completo, nunca se recorta
+en silencio. `AI_GAME_REPAIR_ROUND` distingue `generatedCount` (el tamaño real
+devuelto) / `acceptedCount` / `rejectedQuestionCount` (preguntas) / `issueCount`
+(≥ el anterior) / `missingCount`; un desajuste de lote se registra además como
+`ai_generation_failure` con `validationRule = unexpected_question_count`. El prompt de reparación es mínimo: sólo el conteo, los
+textos de las preguntas aceptadas (para de-duplicar, nunca opciones ni
+`isCorrect`) y códigos de issue estables — sin `reason` libre del validador ni
+frases de anulación de instrucciones ("ignore the rule…"). Además, el Guardrail
+evalúa **sólo contenido de usuario no confiable**: la petición Converse envía el
+**topic** del usuario dentro de un bloque `guardContent` y deja todo el texto
+propio de la aplicación (ajustes `{difficulty, questionCount}`, directivas de
+reparación, códigos de issue) como bloques `text` normales. Con la API Converse,
+si hay algún bloque `guardContent` el Guardrail de entrada evalúa **sólo** esos
+bloques, así que las instrucciones de reparación ya no se clasifican como
+`PROMPT_ATTACK` del usuario; la evaluación de **salida** sobre la respuesta del
+modelo no cambia. `BedrockGameValidator` aplica la misma frontera (sólo el topic
+va en `guardContent`). La configuración del Guardrail (filtros, temas denegados,
+PII, política de palabras, salida, `trace`) no se toca. Una intervención del
+Guardrail se registra como `AI_GAME_GUARDRAIL_INTERVENED` con un resumen sin
+contenido (política/tipo/acción del filtro, `guardrailId`/`version`) leído de
+`trace.guardrail`. Los issues se separan por
+severidad **según el código, no según lo que afirme el modelo**: factuales y
+estructurales (`ANSWER_MISMATCH`, `MULTIPLE_CORRECT_ANSWERS`, `AMBIGUOUS_QUESTION`,
+`FACTUAL_UNCERTAINTY`, `OFF_TOPIC`, `AGE_INAPPROPRIATE`, `INVALID_OPTIONS` para
+defectos objetivos) bloquean; calidad de distractores (`WEAK_DISTRACTOR`,
+`TOO_EASY_DISTRACTOR`, `DISTRACTOR_QUALITY`, `DIFFICULTY_MISMATCH`) son
+observaciones no bloqueantes (`warningCount`/`warningTypes` en
+`AI_GAME_VALIDATION_SUCCEEDED`). Un quiz "fácil" para niños admite distractores
+simples. Application depende
+sólo de los puertos `GameGenerator` y `GameValidator`; nada se guarda sin un
+veredicto limpio; un fallo técnico del validador falla cerrado. Ver
+`docs/architecture/ADR-011-two-model-ai-generation-pipeline.md`.
 
 ---
 
@@ -709,6 +770,7 @@ Y añade:
 
 ```text
 ADR-010  AWS Amplify Hosting for public web deployment
+ADR-011  Two-model AI generation pipeline (Nova Lite drafts, Nova Pro blind-solves)
 ```
 
 ---

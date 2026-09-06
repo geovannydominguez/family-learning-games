@@ -6,9 +6,11 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 
 import type { GameGenerator } from "../../application/game/GameGenerator.ts";
+import type { GameValidator } from "../../application/game/GameValidator.ts";
 import { GenerateGameService } from "../../application/game/generateGameService.ts";
 import { GameSessionService } from "../../application/game/gameSessionService.ts";
 import { BedrockGameGenerator } from "../../infrastructure/ai/BedrockGameGenerator.ts";
+import { BedrockGameValidator } from "../../infrastructure/ai/BedrockGameValidator.ts";
 import { DynamoDbGameRepository } from "../../infrastructure/repositories/DynamoDbGameRepository.ts";
 import { DynamoDbGameSessionRepository } from "../../infrastructure/repositories/DynamoDbGameSessionRepository.ts";
 import { createHttpRouter } from "./router.ts";
@@ -36,14 +38,26 @@ export function createRuntimeRouter({
   let generator: GameGenerator = {
     generate: async () => { throw new Error("AI generator is disabled."); },
   };
+  let validator: GameValidator = {
+    validate: async () => { throw new Error("AI validator is disabled."); },
+  };
+  let generatorModelId: string | undefined;
+  let validatorModelId: string | undefined;
 
   if (enabled) {
     const region = requireConfiguration("BEDROCK_REGION", environment);
-    const modelId = requireConfiguration("BEDROCK_MODEL_ID", environment);
+    generatorModelId = requireConfiguration("BEDROCK_GENERATOR_MODEL_ID", environment);
+    validatorModelId = requireConfiguration("BEDROCK_VALIDATOR_MODEL_ID", environment);
     const guardrailIdentifier = requireConfiguration("BEDROCK_GUARDRAIL_ID", environment);
     const guardrailVersion = requireConfiguration("BEDROCK_GUARDRAIL_VERSION", environment);
-    generator = new BedrockGameGenerator(createBedrockClient(region), {
-      modelId,
+    const bedrockClient = createBedrockClient(region);
+    generator = new BedrockGameGenerator(bedrockClient, {
+      modelId: generatorModelId,
+      guardrailIdentifier,
+      guardrailVersion,
+    });
+    validator = new BedrockGameValidator(bedrockClient, {
+      modelId: validatorModelId,
       guardrailIdentifier,
       guardrailVersion,
     });
@@ -52,10 +66,14 @@ export function createRuntimeRouter({
   return createHttpRouter({
     games,
     sessionService: new GameSessionService(games, sessions),
-    generationService: new GenerateGameService(generator, games, {
+    generationService: new GenerateGameService(generator, validator, games, {
       enabled,
       createId,
       logDiagnostic: (diagnostic) => console.log(JSON.stringify(diagnostic)),
+      logEvent: (event) => console.log(JSON.stringify(event)),
+      ...(generatorModelId && validatorModelId
+        ? { models: { generator: generatorModelId, validator: validatorModelId } }
+        : {}),
     }),
   });
 }
