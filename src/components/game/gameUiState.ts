@@ -1,4 +1,4 @@
-import type { StartGameSessionCommand } from "../../application/game/gameSessionContracts.ts";
+import type { PublicGame, StartGameSessionCommand } from "../../application/game/gameSessionContracts.ts";
 import type { Difficulty } from "../../domain/game/types.ts";
 import { GameApiError } from "../../infrastructure/http/GameApiClient.ts";
 
@@ -14,6 +14,32 @@ export function buildStartSessionCommand(
     difficulty,
     ...(gameId !== undefined ? { gameId } : {}),
   };
+}
+
+/**
+ * From the full `GET /games` catalog, keep only AI-generated games (id `ai-…`).
+ * Seed/base-category games (id === category id) are never included, so they
+ * cannot be duplicated in the "Tus juegos creados" section. Returns `[]` for a
+ * missing or malformed response so the section simply stays hidden.
+ */
+export function selectCreatedGames(games: readonly PublicGame[] | null | undefined): PublicGame[] {
+  if (!Array.isArray(games)) return [];
+  return games.filter((game) => typeof game?.id === "string" && game.id.startsWith("ai-"));
+}
+
+/** An AI game is generated with a single difficulty; fall back defensively. */
+export function createdGameDifficulty(game: PublicGame): Difficulty {
+  return game.difficulties[0] ?? "normal";
+}
+
+/**
+ * Session command for replaying an already-persisted AI game. Always carries the
+ * exact `gameId` (ai-…) and that game's own `category.id`, so the backend
+ * selects the stored game by id and never falls back to legacy category lookup.
+ * No call to Bedrock is involved.
+ */
+export function buildCreatedGameSessionCommand(playerId: string, game: PublicGame): StartGameSessionCommand {
+  return buildStartSessionCommand(playerId, game.category.id, createdGameDifficulty(game), game.id);
 }
 
 export function gameUiErrorMessage(error: unknown, fallback: string): string {

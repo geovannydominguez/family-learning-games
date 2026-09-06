@@ -331,6 +331,36 @@ test("system prompt requires meaningful intra-game diversity across the 10 quest
   assert.ok(prompt.includes("Target player age: 4 years old."));
 });
 
+test("system prompt forbids duplicate question and answer texts and asks for a pre-return check", async () => {
+  const commands: ConverseCommand[] = [];
+  const generator = new BedrockGameGenerator({ send: async (command: ConverseCommand) => {
+    commands.push(command);
+    return textResponse(JSON.stringify(validPayload()));
+  } }, { modelId: "model", guardrailIdentifier: "guardrail", guardrailVersion: "1" });
+
+  await generator.generate(request);
+  const prompt = commands[0].input.system?.[0].text ?? "";
+
+  for (const rule of [
+    "Every question text must be unique across the 10 questions",
+    "no two answer texts may be identical",
+    "Prefer every answer text to be unique across the whole game when practical",
+    "Do not reuse the same sentence with only minor wording changes",
+    "Before returning the JSON, internally verify that there are 10 unique question texts",
+    "every question has 4 distinct answer texts",
+    "every question has exactly one correct answer",
+  ]) assert.ok(prompt.includes(rule), `missing uniqueness rule: ${rule}`);
+
+  // The intra-game diversity rules from the previous change are still present.
+  assert.ok(prompt.includes("The 10 questions must be meaningfully diverse"));
+  assert.ok(prompt.includes("Do not create near-duplicate questions by only changing the numbers, names, or nouns"));
+
+  // The structure example was not enlarged.
+  const marker = "exactly 10 questions:\n";
+  const exampleLine = prompt.slice(prompt.indexOf(marker) + marker.length).split("\n")[0];
+  assert.equal((JSON.parse(exampleLine) as { questions: unknown[] }).questions.length, 2);
+});
+
 test("sanitizes technical SDK failures without retaining provider details", async () => {
   const failure = Object.assign(new Error("secret endpoint and prompt"), {
     name: "BedrockTransportFailure",

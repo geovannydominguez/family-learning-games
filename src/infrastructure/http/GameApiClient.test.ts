@@ -75,6 +75,37 @@ test("generates games and surfaces throttling without automatic retry", async ()
   assert.equal(calls, 2);
 });
 
+test("lists games with a GET request and returns the catalog as-is", async () => {
+  const requests: Array<{ input: string; method?: string }> = [];
+  const catalog = [
+    { id: "animals", title: "Animales", category: { id: "animals", name: "Animales", description: "d", icon: "🐼" }, difficulties: ["easy"], questions: [] },
+    { id: "ai-pokemon-1", title: "Pokémon", category: { id: "pokemon", name: "Pokémon", description: "d", icon: "🎮" }, difficulties: ["hard"], questions: [] },
+  ];
+  const client = new GameApiClient("https://api.example.com", async (input, init) => {
+    requests.push({ input: String(input), method: init?.method });
+    return new Response(JSON.stringify(catalog), { status: 200, headers: { "content-type": "application/json" } });
+  });
+
+  const games = await client.listGames();
+
+  assert.equal(requests[0].input, "https://api.example.com/games");
+  assert.equal(requests[0].method, "GET");
+  assert.deepEqual(games.map((game) => game.id), ["animals", "ai-pokemon-1"]);
+});
+
+test("starts a session for a persisted ai game by sending its exact gameId", async () => {
+  const requests: Array<{ input: string; body: unknown }> = [];
+  const client = new GameApiClient("https://api.example.com", async (input, init) => {
+    requests.push({ input: String(input), body: JSON.parse(String(init?.body)) });
+    return new Response(JSON.stringify({ id: "session-1" }), { status: 201, headers: { "content-type": "application/json" } });
+  });
+
+  await client.startSession({ playerId: "joaquin", categoryId: "pokemon", gameId: "ai-pokemon-1", difficulty: "hard" });
+
+  assert.equal(requests[0].input, "https://api.example.com/game-sessions");
+  assert.deepEqual(requests[0].body, { playerId: "joaquin", categoryId: "pokemon", gameId: "ai-pokemon-1", difficulty: "hard" });
+});
+
 test("maps a non-JSON 429 response without retrying", async () => {
   let calls = 0;
   const client = new GameApiClient("https://api.example.com", async () => {

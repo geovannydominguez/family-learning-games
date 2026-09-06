@@ -47,6 +47,10 @@ export class GameApiClient {
     return this.request("/game-setup", { method: "GET" });
   }
 
+  listGames(): Promise<PublicGame[]> {
+    return this.request("/games", { method: "GET" });
+  }
+
   startSession(command: StartGameSessionCommand): Promise<PublicGameSession> {
     const body = {
       playerId: command.playerId,

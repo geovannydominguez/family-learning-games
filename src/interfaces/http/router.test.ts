@@ -28,6 +28,7 @@ test("lists persisted games, gets one game and retrieves a durable session", asy
   const list = await router({ requestId: "r", method: "GET", path: "/games" });
   assert.equal(list.statusCode, 200);
   assert.deepEqual(JSON.parse(list.body).map((game: { id: string }) => game.id), ["animals", "space", "numbers"]);
+  assert.equal(list.body.includes("isCorrect"), false);
 
   const game = await router({ requestId: "r", method: "GET", path: "/games/animals" });
   assert.equal(game.statusCode, 200);
@@ -75,6 +76,69 @@ test("accepts optional gameId when starting a session", async () => {
 
   assert.equal(response.statusCode, 201);
   assert.equal((await sessions.findById("session-ai"))?.gameId, "ai-animals-1");
+});
+
+test("GET /games lists ai-generated games with the public shape and no answer keys", async () => {
+  const games = new MockGameRepository();
+  const base = await games.findById("animals");
+  assert.ok(base);
+  await games.create({
+    ...base,
+    id: "ai-pokemon-1",
+    title: "Pokémon",
+    category: { id: "pokemon", name: "Pokémon", description: "Juego IA de Pokémon.", icon: "🎮" },
+    questions: base.questions.filter((question) => question.difficulty === "hard").map((question) => ({ ...question, categoryId: "pokemon" })),
+  });
+  const router = createHttpRouter({
+    games,
+    sessionService: new GameSessionService(games, new InMemoryGameSessionRepository()),
+    log: () => {},
+  });
+
+  const response = await router({ requestId: "r", method: "GET", path: "/games" });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body.includes("isCorrect"), false);
+  const list = JSON.parse(response.body) as Array<{ id: string; title: string; category: Record<string, string>; difficulties: string[] }>;
+  assert.deepEqual(list.map((game) => game.id), ["animals", "space", "numbers", "ai-pokemon-1"]);
+  const created = list.find((game) => game.id === "ai-pokemon-1");
+  assert.ok(created);
+  assert.equal(created.title, "Pokémon");
+  assert.deepEqual(Object.keys(created.category).sort(), ["description", "icon", "id", "name"]);
+  assert.deepEqual(created.difficulties, ["hard"]);
+});
+
+test("starts a session for a persisted ai game by its exact gameId and slug category without generating", async () => {
+  const games = new MockGameRepository();
+  const base = await games.findById("animals");
+  assert.ok(base);
+  await games.create({
+    ...base,
+    id: "ai-pokemon-1",
+    title: "Pokémon",
+    category: { id: "pokemon", name: "Pokémon", description: "Juego IA de Pokémon.", icon: "🎮" },
+    questions: base.questions.filter((question) => question.difficulty === "hard").map((question) => ({ ...question, categoryId: "pokemon" })),
+  });
+  const sessions = new InMemoryGameSessionRepository();
+  const generationService = { generate: async () => { throw new Error("must not generate"); } } as unknown as GenerateGameService;
+  const router = createHttpRouter({
+    games,
+    sessionService: new GameSessionService(games, sessions, () => "session-poke", () => 0),
+    generationService,
+    log: () => {},
+  });
+
+  const response = await router({
+    requestId: "r-poke",
+    method: "POST",
+    path: "/game-sessions",
+    body: JSON.stringify({ playerId: "papa", categoryId: "pokemon", gameId: "ai-pokemon-1", difficulty: "hard" }),
+  });
+
+  assert.equal(response.statusCode, 201);
+  const stored = await sessions.findById("session-poke");
+  assert.equal(stored?.gameId, "ai-pokemon-1");
+  assert.equal(stored?.player.id, "papa");
 });
 
 test("POST /games/generate returns the existing public game shape without answer keys", async () => {

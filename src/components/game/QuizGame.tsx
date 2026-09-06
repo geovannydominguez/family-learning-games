@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import type { AnswerFeedback, GameSetupResponse, PublicGame, PublicGameSession } from "@/application/game/gameSessionContracts";
 import type { Category, Difficulty, Player } from "@/domain/game/types";
 import { createGameApiClient } from "@/infrastructure/http/GameApiClient";
-import { buildStartSessionCommand, gameUiErrorMessage } from "./gameUiState";
+import { buildStartSessionCommand, createdGameDifficulty, gameUiErrorMessage, selectCreatedGames } from "./gameUiState";
 
 type FlowStep = "home" | "player" | "category" | "difficulty" | "generate" | "game";
 
@@ -14,6 +14,9 @@ const difficultyOptions: Array<{ id: Difficulty; label: string; icon: string; de
   { id: "normal", label: "Normal", icon: "⭐", description: "Un desafío equilibrado" },
   { id: "hard", label: "Difícil", icon: "🚀", description: "Para grandes exploradores" },
 ];
+
+const difficultyLabel = (id: Difficulty): string =>
+  difficultyOptions.find((option) => option.id === id)?.label ?? id;
 
 export function QuizGame() {
   const [setup, setSetup] = useState<GameSetupResponse | null>(null);
@@ -27,6 +30,8 @@ export function QuizGame() {
   const [session, setSession] = useState<PublicGameSession | null>(null);
   const [feedback, setFeedback] = useState<AnswerFeedback | null>(null);
   const [pendingSession, setPendingSession] = useState<PublicGameSession | null>(null);
+  const [createdGames, setCreatedGames] = useState<PublicGame[] | null>(null);
+  const [createdGamesFailed, setCreatedGamesFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loadingSetup, setLoadingSetup] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -46,7 +51,20 @@ export function QuizGame() {
     }
   }, []);
 
+  const loadCreatedGames = useCallback(async () => {
+    try {
+      setCreatedGames(await createGameApiClient().listGames());
+      setCreatedGamesFailed(false);
+    } catch {
+      // "Tus juegos creados" is optional: never block the base categories.
+      setCreatedGamesFailed(true);
+    }
+  }, []);
+
   useEffect(() => { void loadSetup(); }, [loadSetup]);
+  useEffect(() => {
+    if (step === "category") void loadCreatedGames();
+  }, [step, loadCreatedGames]);
   useEffect(() => {
     if (step !== "home") headingRef.current?.focus();
   }, [session?.currentQuestionIndex, session?.status, step]);
@@ -77,14 +95,14 @@ export function QuizGame() {
     setStep("difficulty");
   }
 
-  async function startGame(difficulty: Difficulty, gameId = selectedGameId) {
-    if (!selectedPlayer || !selectedCategory) return;
+  async function startGame(difficulty: Difficulty, gameId = selectedGameId, category = selectedCategory) {
+    if (!selectedPlayer || !category) return;
     setSubmitting(true);
     setError(null);
     try {
       const started = await createGameApiClient().startSession(buildStartSessionCommand(
         selectedPlayer.id,
-        selectedCategory.id,
+        category.id,
         difficulty,
         gameId,
       ));
@@ -97,6 +115,18 @@ export function QuizGame() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function startCreatedGame(game: PublicGame) {
+    if (!selectedPlayer) {
+      setError("Elige un jugador antes de jugar.");
+      setStep("player");
+      return;
+    }
+    setSelectedCategory(game.category);
+    setSelectedGameId(game.id);
+    setError(null);
+    await startGame(createdGameDifficulty(game), game.id, game.category);
   }
 
   async function generateGame(event: FormEvent<HTMLFormElement>) {
@@ -124,6 +154,7 @@ export function QuizGame() {
       setGeneratedGame(game);
       setSelectedCategory(game.category);
       setSelectedGameId(game.id);
+      void loadCreatedGames();
     } catch (caught) {
       setError(gameUiErrorMessage(caught, "No pudimos crear el juego."));
     } finally {
@@ -193,6 +224,7 @@ export function QuizGame() {
   if (step === "category") return (
     <SelectionLayout headingRef={headingRef} eyebrow={`Jugando como ${selectedPlayer?.name ?? "familia"}`} title="¿Qué quieres aprender?" description="Elige una categoría para tu próxima partida." error={error} onBack={() => setStep("player")}>
       <div className="grid gap-4 sm:grid-cols-3">{setup.categories.map((category) => <button key={category.id} type="button" onClick={() => chooseCategory(category.id)} className="selection-card text-left"><span className="text-6xl" aria-hidden="true">{category.icon}</span><span className="mt-3 block text-2xl font-black text-slate-900">{category.name}</span><span className="mt-2 block text-base leading-relaxed text-slate-600">{category.description}</span></button>)}</div>
+      <CreatedGamesSection games={createdGames} failed={createdGamesFailed} disabled={submitting} onPlay={(game) => void startCreatedGame(game)} />
       <div className="mt-8 border-t border-violet-100 pt-8 text-center"><p className="text-lg text-slate-700">¿Quieres explorar otro tema?</p><button type="button" className="button-secondary mt-4" onClick={() => { setError(null); setGeneratedGame(null); setStep("generate"); }}>✨ Crear un juego nuevo</button></div>
     </SelectionLayout>
   );
@@ -259,6 +291,30 @@ export function QuizGame() {
         <button type="button" onClick={nextQuestion} disabled={!pendingSession || submitting} className="button-primary mt-2 w-full disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500">{session.currentQuestionIndex === session.totalQuestions - 1 ? "Ver resultado" : "Siguiente pregunta"}</button>
       </section>
     </div></main>
+  );
+}
+
+function CreatedGamesSection({ games, failed, disabled, onPlay }: { games: PublicGame[] | null; failed: boolean; disabled: boolean; onPlay: (game: PublicGame) => void }) {
+  const created = selectCreatedGames(games);
+  if (created.length === 0) {
+    return failed
+      ? <p className="mt-8 text-center text-sm text-slate-500" role="status">No pudimos cargar tus juegos creados. Vuelve a intentarlo más tarde.</p>
+      : null;
+  }
+  return (
+    <section className="mt-10" aria-labelledby="created-games-title">
+      <h2 id="created-games-title" className="text-2xl font-black text-slate-900">Tus juegos creados</h2>
+      <p className="mt-1 text-base text-slate-600">Vuelve a jugar los juegos que creaste con IA, sin generarlos otra vez.</p>
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        {created.map((game) => (
+          <button key={game.id} type="button" disabled={disabled} onClick={() => onPlay(game)} className="selection-card text-left disabled:cursor-wait disabled:opacity-60">
+            <span className="text-5xl" aria-hidden="true">{game.category.icon || "✨"}</span>
+            <span className="mt-3 block text-xl font-black text-slate-900">{game.title}</span>
+            <span className="mt-1 block text-sm font-bold text-slate-500">{game.category.name}{game.difficulties[0] ? ` · ${difficultyLabel(game.difficulties[0])}` : ""}</span>
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }
 
