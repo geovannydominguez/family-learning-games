@@ -14,11 +14,15 @@ test("defines the default-disabled Lambda, seven-route HTTP API, durable tables 
   template.resourceCountIs("AWS::DynamoDB::Table", 2);
   template.resourceCountIs("AWS::Logs::LogGroup", 1);
   template.hasResourceProperties("AWS::Lambda::Function", { Runtime: "nodejs22.x", Timeout: 10 });
-  template.hasResourceProperties("AWS::Lambda::Function", { Environment: { Variables: Match.objectLike({
-    GAMES_TABLE_NAME: Match.anyValue(),
-    GAME_SESSIONS_TABLE_NAME: Match.anyValue(),
-    AI_GAME_GENERATION_ENABLED: "false",
-  }) } });
+  template.hasResourceProperties("AWS::Lambda::Function", {
+    Environment: {
+      Variables: Match.objectLike({
+        GAMES_TABLE_NAME: Match.anyValue(),
+        GAME_SESSIONS_TABLE_NAME: Match.anyValue(),
+        AI_GAME_GENERATION_ENABLED: "false",
+      })
+    }
+  });
   template.hasResourceProperties("AWS::ApiGatewayV2::Api", { CorsConfiguration: Match.objectLike({ AllowOrigins: ["https://family.example.com"] }) });
   template.hasResourceProperties("AWS::Logs::LogGroup", { RetentionInDays: 7 });
   template.hasResourceProperties("AWS::ApiGatewayV2::Route", { RouteKey: "GET /game-setup" });
@@ -33,10 +37,14 @@ test("defines the default-disabled Lambda, seven-route HTTP API, durable tables 
   template.hasResourceProperties("AWS::DynamoDB::Table", { TableName: "dev-family-learning-games-games" });
   template.hasResourceProperties("AWS::DynamoDB::Table", { TableName: "dev-family-learning-games-game-sessions" });
   template.hasResource("AWS::DynamoDB::Table", { DeletionPolicy: "Delete", UpdateReplacePolicy: "Delete" });
-  template.hasResourceProperties("AWS::IAM::Policy", { PolicyDocument: { Statement: Match.arrayWith([
-    Match.objectLike({ Action: ["dynamodb:GetItem", "dynamodb:Scan"], Effect: "Allow" }),
-    Match.objectLike({ Action: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"], Effect: "Allow" }),
-  ]) } });
+  template.hasResourceProperties("AWS::IAM::Policy", {
+    PolicyDocument: {
+      Statement: Match.arrayWith([
+        Match.objectLike({ Action: ["dynamodb:GetItem", "dynamodb:Scan"], Effect: "Allow" }),
+        Match.objectLike({ Action: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"], Effect: "Allow" }),
+      ])
+    }
+  });
   template.resourceCountIs("AWS::Bedrock::Guardrail", 0);
   template.resourceCountIs("AWS::Bedrock::GuardrailVersion", 0);
   assert.equal(JSON.stringify(template.toJSON()).includes("bedrock:InvokeModel"), false);
@@ -72,25 +80,53 @@ test("provisions one guarded Bedrock integration with scoped IAM when enabled by
   template.resourceCountIs("AWS::Bedrock::GuardrailVersion", 1);
   template.hasResourceProperties("AWS::Lambda::Function", {
     Timeout: 28,
-    Environment: { Variables: Match.objectLike({
-      AI_GAME_GENERATION_ENABLED: "true",
-      BEDROCK_MODEL_ID: "amazon.nova-micro-v1:0",
-      BEDROCK_REGION: "us-east-1",
-      BEDROCK_GUARDRAIL_ID: Match.anyValue(),
-      BEDROCK_GUARDRAIL_VERSION: Match.anyValue(),
-    }) },
+    Environment: {
+      Variables: Match.objectLike({
+        AI_GAME_GENERATION_ENABLED: "true",
+        BEDROCK_MODEL_ID: "amazon.nova-micro-v1:0",
+        BEDROCK_REGION: "us-east-1",
+        BEDROCK_GUARDRAIL_ID: Match.anyValue(),
+        BEDROCK_GUARDRAIL_VERSION: Match.anyValue(),
+      })
+    },
   });
   template.hasResourceProperties("AWS::Bedrock::Guardrail", {
     BlockedInputMessaging: "This request cannot be processed.",
     BlockedOutputsMessaging: "This generated content cannot be provided.",
-    ContentPolicyConfig: { FiltersConfig: [
-      "SEXUAL", "VIOLENCE", "HATE", "INSULTS", "MISCONDUCT", "PROMPT_ATTACK",
-    ].map((type) => Match.objectLike({ Type: type, InputStrength: "HIGH", OutputStrength: "HIGH" })) },
-    SensitiveInformationPolicyConfig: { PiiEntitiesConfig: Match.arrayWith([
-      Match.objectLike({ Type: "EMAIL", Action: "BLOCK" }),
-      Match.objectLike({ Type: "PHONE", Action: "BLOCK" }),
-      Match.objectLike({ Type: "ADDRESS", Action: "BLOCK" }),
-    ]) },
+
+    ContentPolicyConfig: {
+      FiltersConfig: [
+        "SEXUAL",
+        "VIOLENCE",
+        "HATE",
+        "INSULTS",
+        "MISCONDUCT",
+      ].map((type) =>
+        Match.objectLike({
+          Type: type,
+          InputStrength: "HIGH",
+          OutputStrength: "HIGH",
+          InputEnabled: true,
+          OutputEnabled: true,
+        }),
+      ).concat([
+        Match.objectLike({
+          Type: "PROMPT_ATTACK",
+          InputStrength: "HIGH",
+          OutputStrength: "NONE",
+          InputEnabled: true,
+          OutputEnabled: false,
+        }),
+      ]),
+    },
+
+    SensitiveInformationPolicyConfig: {
+      PiiEntitiesConfig: Match.arrayWith([
+        Match.objectLike({ Type: "EMAIL", Action: "BLOCK" }),
+        Match.objectLike({ Type: "PHONE", Action: "BLOCK" }),
+        Match.objectLike({ Type: "ADDRESS", Action: "BLOCK" }),
+      ])
+    },
   });
   const guardrail = Object.values(template.findResources("AWS::Bedrock::Guardrail"))[0];
   const pii = guardrail.Properties.SensitiveInformationPolicyConfig.PiiEntitiesConfig as Array<{ Type: string }>;
@@ -142,11 +178,13 @@ test("uses the deployment region for the Guardrail, Runtime client and model ARN
 });
 
 test("accepts configurable route throttling and rejects unsafe context values", () => {
-  const app = new App({ context: {
-    generationThrottleRateLimit: "3.5",
-    generationThrottleBurstLimit: "4",
-    aiGameGenerationEnabled: "false",
-  } });
+  const app = new App({
+    context: {
+      generationThrottleRateLimit: "3.5",
+      generationThrottleBurstLimit: "4",
+      aiGameGenerationEnabled: "false",
+    }
+  });
   const template = Template.fromStack(new FamilyLearningGamesBackendStack(app, "ThrottleStack"));
   template.hasResourceProperties("AWS::ApiGatewayV2::Stage", {
     DefaultRouteSettings: Match.absent(),
@@ -172,10 +210,12 @@ test("accepts configurable route throttling and rejects unsafe context values", 
 });
 
 test("lets explicit stack props override route throttle context", () => {
-  const app = new App({ context: {
-    generationThrottleRateLimit: "9",
-    generationThrottleBurstLimit: "9",
-  } });
+  const app = new App({
+    context: {
+      generationThrottleRateLimit: "9",
+      generationThrottleBurstLimit: "9",
+    }
+  });
   const template = Template.fromStack(new FamilyLearningGamesBackendStack(app, "ThrottlePropsStack", {
     generationThrottleRateLimit: 2.25,
     generationThrottleBurstLimit: 3,
@@ -207,9 +247,11 @@ test("defaults CORS to localhost when no origin context is supplied", () => {
 });
 
 test("accepts a comma-separated allowedOrigins context alongside localhost", () => {
-  const app = new App({ context: {
-    allowedOrigins: "http://localhost:3000, https://main.d123456789.amplifyapp.com",
-  } });
+  const app = new App({
+    context: {
+      allowedOrigins: "http://localhost:3000, https://main.d123456789.amplifyapp.com",
+    }
+  });
   const template = Template.fromStack(new FamilyLearningGamesBackendStack(app, "AllowedOriginsStack"));
   template.hasResourceProperties("AWS::ApiGatewayV2::Api", {
     CorsConfiguration: Match.objectLike({

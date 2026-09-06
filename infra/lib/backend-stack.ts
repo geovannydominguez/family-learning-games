@@ -244,12 +244,13 @@ function createGuardrailPolicy() {
   ].map((type) => ({
     type,
     inputStrength: "HIGH",
-    outputStrength: "HIGH",
+    outputStrength: type === "PROMPT_ATTACK" ? "NONE" : "HIGH",
     inputAction: "BLOCK",
     outputAction: "BLOCK",
     inputEnabled: true,
-    outputEnabled: true,
+    outputEnabled: type !== "PROMPT_ATTACK",
   }));
+
   const piiEntitiesConfig = [
     "EMAIL",
     "PHONE",
@@ -265,6 +266,7 @@ function createGuardrailPolicy() {
     inputEnabled: true,
     outputEnabled: true,
   }));
+
   return {
     blockedInputMessaging: "This request cannot be processed.",
     blockedOutputsMessaging: "This generated content cannot be provided.",

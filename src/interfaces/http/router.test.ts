@@ -103,7 +103,7 @@ test("POST /games/generate returns the existing public game shape without answer
   assert.equal(response.statusCode, 201);
   assert.equal(JSON.parse(response.body).id, "ai-animals-1");
   assert.equal(response.body.includes("isCorrect"), false);
-  assert.deepEqual(commands, [{ topic: "animals", difficulty: "easy", questionCount: 10, playerId: "amelia" }]);
+  assert.deepEqual(commands, [{ topic: "animals", difficulty: "easy", questionCount: 10, playerId: "amelia", correlationId: "generate-1" }]);
 });
 
 test("POST /games/generate maps generation errors to safe status contracts", async () => {

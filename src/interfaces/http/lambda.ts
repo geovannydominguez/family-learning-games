@@ -52,7 +52,11 @@ export function createRuntimeRouter({
   return createHttpRouter({
     games,
     sessionService: new GameSessionService(games, sessions),
-    generationService: new GenerateGameService(generator, games, { enabled, createId }),
+    generationService: new GenerateGameService(generator, games, {
+      enabled,
+      createId,
+      logDiagnostic: (diagnostic) => console.log(JSON.stringify(diagnostic)),
+    }),
   });
 }
 

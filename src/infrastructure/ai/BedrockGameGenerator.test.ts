@@ -186,6 +186,151 @@ test("checks guardrail and content filtering stop reasons before parsing", async
   }
 });
 
+test("tags invalid candidates with a safe internal failure type and stop reason only", async () => {
+  const scenarios: Array<{ response: object; failureType: string; stopReason?: string }> = [
+    {
+      response: {
+        stopReason: "guardrail_intervened",
+        output: { message: { content: [{ text: "must not be parsed" }] } },
+        trace: { secret: "provider detail" },
+      },
+      failureType: "guardrail_intervened",
+      stopReason: "guardrail_intervened",
+    },
+    {
+      response: {
+        stopReason: "content_filtered",
+        output: { message: { content: [{ text: "must not be parsed" }] } },
+      },
+      failureType: "content_filtered",
+      stopReason: "content_filtered",
+    },
+    {
+      response: { stopReason: "max_tokens", output: { message: { content: [{ text: "{ truncated json" }] } } },
+      failureType: "invalid_json",
+      stopReason: "max_tokens",
+    },
+    { response: textResponse("[]"), failureType: "invalid_shape", stopReason: "end_turn" },
+    {
+      response: { stopReason: "end_turn", output: { message: { content: [{ image: { format: "png" } }] } } },
+      failureType: "invalid_shape",
+      stopReason: "end_turn",
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const generator = new BedrockGameGenerator({ send: async () => scenario.response }, {
+      modelId: "model",
+      guardrailIdentifier: "guardrail",
+      guardrailVersion: "1",
+    });
+
+    await assert.rejects(generator.generate(request), (error: unknown) => {
+      assert.ok(error instanceof InvalidGeneratedGameCandidateError);
+      assert.equal(error.failure.failureType, scenario.failureType);
+      assert.equal(error.failure.stopReason, scenario.stopReason);
+      assert.equal("validationRule" in error.failure, false);
+      assert.equal("validationField" in error.failure, false);
+      const serialized = JSON.stringify(error);
+      assert.equal(serialized.includes("provider detail"), false);
+      assert.equal(serialized.includes("truncated json"), false);
+      return true;
+    });
+  }
+});
+
+test("system prompt states every required field, the slug/emoji rules, and a coherent JSON example", async () => {
+  const commands: ConverseCommand[] = [];
+  const generator = new BedrockGameGenerator({ send: async (command: ConverseCommand) => {
+    commands.push(command);
+    return textResponse(JSON.stringify(validPayload()));
+  } }, { modelId: "model", guardrailIdentifier: "guardrail", guardrailVersion: "1" });
+
+  await generator.generate(request);
+  const prompt = commands[0].input.system?.[0].text ?? "";
+
+  for (const rule of [
+    "Every one of these fields is REQUIRED and must be present and non-empty",
+    "title, difficulty, category, category.id, category.name, category.description, category.icon",
+    "questions, question.id, question.categoryId, question.difficulty, question.text",
+    "answers, answer.id, answer.text, answer.isCorrect",
+    "category.id must be a short lowercase ASCII slug",
+    "category.icon must be a single emoji",
+    "Every question.categoryId must equal category.id exactly",
+    "structure example only; actual output must still contain exactly 10 questions",
+  ]) assert.ok(prompt.includes(rule), `missing prompt rule: ${rule}`);
+
+  // The embedded example is the single line right after the marker.
+  const marker = "exactly 10 questions:\n";
+  const exampleLine = prompt.slice(prompt.indexOf(marker) + marker.length).split("\n")[0];
+  const example = JSON.parse(exampleLine) as {
+    title: string;
+    difficulty: string;
+    category: { id: string; name: string; description: string; icon: string };
+    questions: Array<{
+      id: string;
+      categoryId: string;
+      difficulty: string;
+      text: string;
+      answers: Array<{ id: string; text: string; isCorrect: boolean }>;
+    }>;
+  };
+
+  assert.ok(example.title.length > 0);
+  assert.match(example.category.id, /^[a-z0-9-]+$/);
+  assert.ok(example.category.name.length > 0);
+  assert.ok(example.category.description.length > 0);
+  assert.ok(example.category.icon.length > 0);
+  assert.ok(example.questions.length >= 1);
+  for (const question of example.questions) {
+    assert.equal(question.categoryId, example.category.id);
+    assert.equal(question.answers.length, 4);
+    assert.equal(question.answers.filter((answer) => answer.isCorrect === true).length, 1);
+    for (const answer of question.answers) assert.equal(typeof answer.isCorrect, "boolean");
+  }
+
+  // The user message is unchanged: still exactly { topic, difficulty, questionCount }.
+  assert.deepEqual(JSON.parse(commands[0].input.messages?.[0].content?.[0].text ?? ""), {
+    topic: "dinosaurs",
+    difficulty: "easy",
+    questionCount: 10,
+  });
+});
+
+test("system prompt requires meaningful intra-game diversity across the 10 questions", async () => {
+  const commands: ConverseCommand[] = [];
+  const generator = new BedrockGameGenerator({ send: async (command: ConverseCommand) => {
+    commands.push(command);
+    return textResponse(JSON.stringify(validPayload()));
+  } }, { modelId: "model", guardrailIdentifier: "guardrail", guardrailVersion: "1" });
+
+  await generator.generate(request);
+  const prompt = commands[0].input.system?.[0].text ?? "";
+
+  for (const rule of [
+    "The 10 questions must be meaningfully diverse",
+    "at least 4 different question or reasoning types",
+    "Do not use the same question template or pattern more than twice",
+    "Do not create near-duplicate questions by only changing the numbers, names, or nouns",
+    "This diversity must stay appropriate for the target player age",
+    "hard stays relative to the target age",
+    "For ages 4 through 6, do not introduce more advanced concepts only to add variety",
+    "For numeric or math topics, draw variety",
+    "For animals, vary across identification, habitat, feeding",
+    "For space, vary across planets, objects, positions",
+  ]) assert.ok(prompt.includes(rule), `missing diversity rule: ${rule}`);
+
+  // Diversity rules do not enlarge the structure example (still 2 questions).
+  const marker = "exactly 10 questions:\n";
+  const exampleLine = prompt.slice(prompt.indexOf(marker) + marker.length).split("\n")[0];
+  const example = JSON.parse(exampleLine) as { questions: unknown[] };
+  assert.equal(example.questions.length, 2);
+
+  // The young-child hard restrictions are untouched.
+  assert.ok(prompt.includes("powers or exponents"));
+  assert.ok(prompt.includes("Target player age: 4 years old."));
+});
+
 test("sanitizes technical SDK failures without retaining provider details", async () => {
   const failure = Object.assign(new Error("secret endpoint and prompt"), {
     name: "BedrockTransportFailure",

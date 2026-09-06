@@ -118,6 +118,7 @@ async function route(
       difficulty: body.difficulty as Difficulty,
       questionCount: body.questionCount as number,
       playerId: body.playerId as string,
+      correlationId: request.requestId,
     });
     return json(201, toPublicGame(game));
   }
