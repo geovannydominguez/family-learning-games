@@ -175,6 +175,7 @@ test("POST /games/generate maps generation errors to safe status contracts", asy
     { error: new ApplicationError("INVALID_GENERATION_REQUEST", "Generation request is invalid."), status: 400, code: "INVALID_GENERATION_REQUEST" },
     { error: new ApplicationError("AI_GENERATION_DISABLED", "AI game generation is disabled."), status: 503, code: "AI_GENERATION_DISABLED" },
     { error: new ApplicationError("AI_GENERATED_CONTENT_INVALID", "Generated content is invalid."), status: 422, code: "AI_GENERATED_CONTENT_INVALID" },
+    { error: new ApplicationError("AI_GENERATION_BLOCKED", "AI game generation was blocked by content safety rules."), status: 422, code: "AI_GENERATION_BLOCKED" },
     { error: new ApplicationError("AI_GENERATION_FAILED", "AI game generation failed."), status: 502, code: "AI_GENERATION_FAILED" },
     { error: new ApplicationError("GAME_ID_CONFLICT", "Game identity already exists."), status: 409, code: "GAME_ID_CONFLICT" },
     { error: new PersistenceError("create-game", new Error("secret provider detail"), "ai-safe"), status: 500, code: "UNEXPECTED_ERROR" },
@@ -200,6 +201,40 @@ test("POST /games/generate maps generation errors to safe status contracts", asy
     assert.equal(JSON.parse(response.body).error.code, scenario.code);
     assert.equal(response.body.includes("secret"), false);
   }
+});
+
+test("POST /games/generate never leaks Guardrail detail on a blocked generation", async () => {
+  const games = new MockGameRepository();
+  const generationService = {
+    generate: async () => {
+      throw new ApplicationError("AI_GENERATION_BLOCKED", "AI game generation was blocked by content safety rules.");
+    },
+  } as unknown as GenerateGameService;
+  const logs: unknown[] = [];
+  const router = createHttpRouter({
+    games,
+    sessionService: new GameSessionService(games, new InMemoryGameSessionRepository()),
+    generationService,
+    log: (record) => logs.push(record),
+  });
+
+  const response = await router({
+    requestId: "generate-blocked",
+    method: "POST",
+    path: "/games/generate",
+    body: JSON.stringify({ topic: "Mundiales de Futbol", difficulty: "easy", questionCount: 10, playerId: "amelia" }),
+  });
+
+  assert.equal(response.statusCode, 422);
+  const envelope = JSON.parse(response.body);
+  assert.deepEqual(Object.keys(envelope.error).sort(), ["code", "message"]);
+  assert.equal(envelope.error.code, "AI_GENERATION_BLOCKED");
+  for (const token of ["guardrail", "Guardrail", "ADDRESS", "sensitiveInformation", "PII", "policy", "zhwsz6f0kjmi"]) {
+    assert.equal(response.body.includes(token), false);
+  }
+  // a blocked generation is an expected 4xx, so the router logs it at info, not error
+  assert.equal((logs[0] as { level: string }).level, "info");
+  assert.equal("error" in (logs[0] as object), false);
 });
 
 test("POST /games/generate safely rejects malformed request JSON", async () => {

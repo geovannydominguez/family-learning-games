@@ -264,9 +264,9 @@ function createGuardrailPolicy() {
     "CREDIT_DEBIT_CARD_NUMBER",
   ].map((type) => ({
     type,
-    action: "BLOCK",
-    inputAction: "BLOCK",
-    outputAction: "BLOCK",
+    action: type === "ADDRESS" ? "NONE" : "BLOCK",
+    inputAction: type === "ADDRESS" ? "NONE" : "BLOCK",
+    outputAction: type === "ADDRESS" ? "NONE" : "BLOCK",
     inputEnabled: true,
     outputEnabled: true,
   }));

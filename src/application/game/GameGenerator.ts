@@ -25,8 +25,11 @@ export interface GenerateGameRequest {
   /** Present only on a regeneration after a rejected draft. */
   previousIssues?: readonly PreviousGenerationIssue[];
   /**
-   * Verbatim text of questions already accepted for this game. A repair round
-   * must not reproduce any of them. Provider-neutral: plain strings only.
+   * Verbatim text of every question already seen while assembling this game —
+   * accepted, rejected by validation, or generated in an earlier round and then
+   * discarded. A repair round must not reproduce or trivially rephrase any of
+   * them. The set grows monotonically across rounds. Provider-neutral: plain
+   * strings only.
    */
   existingQuestions?: readonly string[];
 }

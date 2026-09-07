@@ -469,15 +469,17 @@ test("a repair request stays minimal: fewer questions, dedup list, issue codes, 
 
   assert.ok(blocks.includes("this request is ONLY for 2 replacement questions"));
   assert.ok(blocks.includes("Return a \"questions\" array with exactly 2 questions — not 10"));
-  assert.ok(blocks.includes("Do not repeat or paraphrase any of them"));
-  assert.ok(blocks.includes("¿Cuál Pokémon es eléctrico?")); // accepted question texts, for de-dup only
+  assert.ok(blocks.includes("Generate exactly 2 NEW questions"));
+  assert.ok(blocks.includes("Do NOT repeat, rephrase, translate"));
+  assert.ok(blocks.includes("Questions you must NOT produce again:"));
+  assert.ok(blocks.includes("¿Cuál Pokémon es eléctrico?")); // seen question texts, for de-dup only
   assert.ok(blocks.includes("- ANSWER_MISMATCH"));
   assert.ok(blocks.includes("- AMBIGUOUS_QUESTION"));
 
   // The repair directives must NOT be inside guardContent — that is the bug fix.
   const guarded = guardedText(content).join("\n");
   assert.equal(guarded.includes("replacement question"), false);
-  assert.equal(guarded.includes("Do not repeat or paraphrase"), false);
+  assert.equal(guarded.includes("Do NOT repeat, rephrase"), false);
   assert.equal(guarded.includes("ANSWER_MISMATCH"), false);
 
   // no instruction-override / reviewer / free-form-reason phrasing
@@ -632,7 +634,7 @@ test("A. application-owned repair instructions are NOT inside guardContent", asy
   for (const appDirective of [
     "replacement question",
     "Return a \"questions\" array with exactly",
-    "Do not repeat or paraphrase any of them",
+    "Questions you must NOT produce again:",
     "¿Cuál Pokémon es de tipo fuego?",
     "Avoid these problem types",
     "ANSWER_MISMATCH",

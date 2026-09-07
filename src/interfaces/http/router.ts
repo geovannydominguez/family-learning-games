@@ -220,6 +220,11 @@ function applicationErrorStatus(code: ApplicationError["code"]): number {
     case "INVALID_GENERATION_REQUEST":
       return 400;
     case "AI_GENERATED_CONTENT_INVALID":
+    // A Guardrail block is a permanent, request-specific refusal (not a transient
+    // upstream fault), so it is a 4xx like invalid content — never a 5xx. Provider
+    // detail (guardrail id/version, policy, filter type) stays in observability
+    // only; the envelope carries just the code and a generic message.
+    case "AI_GENERATION_BLOCKED":
       return 422;
     case "INVALID_SESSION_STATE":
     case "SESSION_CONFLICT":

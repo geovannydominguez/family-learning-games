@@ -72,10 +72,23 @@ export interface GenerationPipelineEvent {
   maxAttempts: number;
   /** 0 for the round's first generation attempt, 1.. for a same-round technical retry. */
   technicalRetry?: number;
+  /**
+   * `false` on `AI_GAME_GUARDRAIL_INTERVENED`: a Guardrail block is a deliberate,
+   * deterministic policy decision, not a transient technical fault, so it is
+   * never retried. Absent on events where retry semantics do not apply.
+   */
+  retryable?: boolean;
   /** Replacement questions asked for this round (10 on round 1, fewer afterwards). */
   requestedQuestionCount?: number;
   /** Total accepted questions in the pool. On success this is exactly 10. */
   acceptedQuestionCount?: number;
+  /**
+   * Size of the monotonically growing exclusion set for this operation — every
+   * question text seen so far (accepted, semantically rejected, or generated and
+   * later discarded). It is the count only; texts are never logged. Present on
+   * `AI_GAME_GENERATION_ATTEMPT` and `AI_GAME_REPAIR_ROUND`.
+   */
+  seenQuestionCount?: number;
   /** AI_GAME_REPAIR_ROUND accounting (all per-round): */
   generatedCount?: number;
   acceptedCount?: number;
@@ -225,7 +238,17 @@ export class GenerateGameService {
   ): Promise<{ title: string; category: Category; questions: Question[] }> {
     const categoryId = toCategorySlug(request.topic);
     const accepted: Question[] = [];
-    const acceptedTexts = new Set<string>();
+    // Exclusion context for the generator: every question text seen this
+    // operation — accepted, rejected by Nova Pro, or generated in an earlier
+    // round and discarded. Keyed by a normalized comparison key; the value is the
+    // first original text, which is what the generator is shown so it phrases
+    // replacements naturally. It grows monotonically across repair rounds and is
+    // never cleared. It is NOT the deterministic duplicate guard — see
+    // `acceptedKeys` — and `accepted` stays the ONLY source of the final game.
+    const seen = new Map<string, string>();
+    // Deterministic `duplicate_text` guard: normalized keys of questions already
+    // in the accepted pool. Unchanged responsibility, only the key is normalized.
+    const acceptedKeys = new Set<string>();
     const warningTypes = new Set<string>();
     let meta: { title: string; category: Category } | undefined;
     let previousIssues: readonly PreviousGenerationIssue[] = [];
@@ -238,14 +261,23 @@ export class GenerateGameService {
         difficulty: request.difficulty,
         targetAge: request.targetAge,
         questionCount: missingCount,
-        ...(acceptedTexts.size > 0 ? { existingQuestions: [...acceptedTexts] } : {}),
+        ...(seen.size > 0 ? { existingQuestions: [...seen.values()] } : {}),
         ...(previousIssues.length > 0 ? { previousIssues } : {}),
       };
 
-      // 1) Generate replacement candidates. A failure that produces no candidate
-      //    content (guardrail block, transport error, malformed response) does
-      //    NOT consume the content-repair round: it gets a bounded same-round
-      //    technical retry first.
+      // 1) Generate replacement candidates. Failures are classified into three
+      //    disjoint kinds, each with its own recovery:
+      //      - TRANSIENT technical fault (transport/throttling/5xx `provider_error`)
+      //        or MALFORMED output (`invalid_json` / `invalid_shape`): a failure
+      //        that produced no candidate content gets ONE bounded same-round
+      //        technical retry; `provider_error` then fails closed, malformed
+      //        output just consumes the round.
+      //      - GUARDRAIL INTERVENTION (`guardrail_intervened` / `content_filtered`):
+      //        a deterministic policy decision driven by the request itself, not a
+      //        transient fault. Retrying the identical `temperature: 0` call — and
+      //        every further repair round — would be blocked the same way, so it
+      //        is recorded once and finalizes the whole operation immediately
+      //        instead of burning retries and rounds until the Lambda times out.
       let raw: unknown;
       for (let technicalRetry = 0; ; technicalRetry += 1) {
         this.emitEvent({
@@ -257,6 +289,7 @@ export class GenerateGameService {
           technicalRetry,
           requestedQuestionCount: missingCount,
           acceptedQuestionCount: accepted.length,
+          seenQuestionCount: seen.size,
         });
         try {
           raw = await this.generator.generate(genRequest);
@@ -265,11 +298,15 @@ export class GenerateGameService {
         } catch (error) {
           const failure = classifyGenerationFailure(error);
           this.emitFailure(round, correlationId, failure, technicalRetry);
-          const guardrailBlocked = failure.failureType === "guardrail_intervened"
-            || failure.failureType === "content_filtered";
-          if (guardrailBlocked) this.emitGuardrail(correlationId, round, missingCount, failure, technicalRetry);
-          const noContentFailure = guardrailBlocked
-            || failure.failureType === "provider_error"
+          if (failure.failureType === "guardrail_intervened" || failure.failureType === "content_filtered") {
+            // Guardrail intervention: no technical retry, no further repair round.
+            this.emitGuardrail(correlationId, round, missingCount, failure, technicalRetry);
+            throw new ApplicationError(
+              "AI_GENERATION_BLOCKED",
+              "AI game generation was blocked by content safety rules.",
+            );
+          }
+          const noContentFailure = failure.failureType === "provider_error"
             || failure.failureType === "invalid_json"
             || failure.failureType === "invalid_shape";
           if (noContentFailure && technicalRetry < this.maxTechnicalRetriesPerRound) {
@@ -279,7 +316,7 @@ export class GenerateGameService {
             // Transport error that also failed its retry: fail closed.
             throw new ApplicationError("AI_GENERATION_FAILED", "AI game generation failed.");
           }
-          // Guardrail / malformed persisted past the technical retry: this round
+          // Malformed response persisted past the technical retry: this round
           // yields no questions and is consumed (the loop stays bounded).
           raw = undefined;
           break;
@@ -312,6 +349,7 @@ export class GenerateGameService {
       const roundStructuralIssues: string[] = [];
       const roundSemanticIssues: string[] = [];
       const candidates: Question[] = [];
+      const candidateKeys: string[] = [];
       const roundTexts = new Set<string>();
       let generatedCount = 0;
       let structuralRejectedCount = 0;
@@ -329,7 +367,11 @@ export class GenerateGameService {
           this.emitRejected(correlationId, round, { issueTypes: [rule] });
           continue;
         }
-        if (acceptedTexts.has(question.text) || roundTexts.has(question.text)) {
+        const dedupKey = questionDedupKey(question.text);
+        // Deterministic guard: reject a candidate that repeats an already-accepted
+        // question or another candidate from the same round. Normalized so trivial
+        // case/accent/punctuation variants collide too.
+        if (acceptedKeys.has(dedupKey) || roundTexts.has(dedupKey)) {
           roundStructuralIssues.push("duplicate_text");
           structuralRejectedCount += 1;
           this.emitFailure(round, correlationId, {
@@ -340,7 +382,12 @@ export class GenerateGameService {
           this.emitRejected(correlationId, round, { issueTypes: ["duplicate_text"] });
           continue;
         }
-        roundTexts.add(question.text);
+        roundTexts.add(dedupKey);
+        // Record every structurally-valid candidate as "seen" now, before Nova Pro
+        // reviews it: even if it is rejected next, the generator must be told not
+        // to produce it again in a later repair round.
+        seen.set(dedupKey, question.text);
+        candidateKeys.push(dedupKey);
         candidates.push(question);
       }
 
@@ -382,8 +429,10 @@ export class GenerateGameService {
         candidates.forEach((question, slot) => {
           const failure = verdict.failures.find((entry) => entry.questionIndex === slot);
           if (!failure) {
+            // Already in `seen`; also register it in the deterministic duplicate
+            // guard. `accepted` is what becomes the final game.
             accepted.push(question);
-            acceptedTexts.add(question.text);
+            acceptedKeys.add(candidateKeys[slot]);
             acceptedThisRound += 1;
             return;
           }
@@ -417,6 +466,7 @@ export class GenerateGameService {
         rejectedQuestionCount,
         issueCount,
         acceptedQuestionCount: accepted.length,
+        seenQuestionCount: seen.size,
         missingCount: Math.max(0, questionCount - accepted.length),
       });
 
@@ -525,6 +575,7 @@ export class GenerateGameService {
       attempt: round,
       round,
       technicalRetry,
+      retryable: false,
       requestedQuestionCount,
       ...(failure.stopReason ? { guardrailStopReason: failure.stopReason } : {}),
       ...(failure.guardrail?.guardrailId ? { guardrailId: failure.guardrail.guardrailId } : {}),
@@ -661,6 +712,24 @@ function classifyGenerationFailure(error: unknown): GeneratedGameCandidateFailur
 
 function safeCorrelationId(value: unknown): string | undefined {
   return typeof value === "string" && correlationIdPattern.test(value) ? value : undefined;
+}
+
+/**
+ * Normalized comparison key for cross-round de-duplication of question text.
+ * Deterministic and dependency-free: it only folds away trivial differences
+ * (case, accents, surrounding quotes/punctuation, repeated inner whitespace) so
+ * that "¿Quién ganó el Mundial 2010?" and "Quien gano el mundial 2010" collide.
+ * It is NEVER the stored question text — questions keep their original wording.
+ */
+function questionDedupKey(text: string): string {
+  return text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/^[\s"'¿¡().,;:!?-]+/, "")
+    .replace(/[\s"'¿¡().,;:!?-]+$/, "")
+    .trim();
 }
 
 /**

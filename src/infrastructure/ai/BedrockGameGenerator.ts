@@ -138,7 +138,8 @@ export class BedrockGameGenerator implements GameGenerator {
  * Extra user-message blocks for a repair round. Kept deliberately minimal and
  * free of instruction-override phrasing ("ignore the rule…") and of any
  * reviewer chain-of-thought or free-form explanation — only the topic, the
- * count, accepted question texts for de-duplication, and stable issue codes.
+ * count, the texts of questions already seen this game (accepted, rejected, or
+ * previously generated) for de-duplication, and stable issue codes.
  */
 function buildRepairBlocks(request: GenerateGameRequest): string[] {
   const blocks: string[] = [];
@@ -149,9 +150,17 @@ function buildRepairBlocks(request: GenerateGameRequest): string[] {
       `The final game contains ${finalGameQuestionCount} questions, but this request is ONLY for ${count} replacement question${plural} for the topic given above. Return a "questions" array with exactly ${count} question${plural} — not ${finalGameQuestionCount}. Keep the same title, category, difficulty, and JSON object shape.`,
     );
   }
-  const existing = (request.existingQuestions ?? []).slice(0, 20).map((text) => `- ${text.slice(0, 160)}`);
+  const existing = (request.existingQuestions ?? []).slice(0, 40).map((text) => `- ${text.slice(0, 160)}`);
   if (existing.length > 0) {
-    blocks.push(`These questions are already in the quiz. Do not repeat or paraphrase any of them:\n${existing.join("\n")}`);
+    const count = request.questionCount;
+    const plural = count === 1 ? "" : "s";
+    blocks.push(
+      `Generate exactly ${count} NEW question${plural}. `
+      + `Do NOT repeat, rephrase, translate, reorder the options of, or make a trivial variant of any question listed below. `
+      + `Do NOT test the same fact with only slightly different wording when other valid facts about the topic are still available; `
+      + `each new question must cover a distinct fact or angle.\n`
+      + `Questions you must NOT produce again:\n${existing.join("\n")}`,
+    );
   }
   const codes = distinctIssueCodes(request.previousIssues);
   if (codes.length > 0) {

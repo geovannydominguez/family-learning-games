@@ -8,6 +8,7 @@ export type ApplicationErrorCode =
   | "INVALID_GENERATION_REQUEST"
   | "AI_GENERATION_DISABLED"
   | "AI_GENERATION_FAILED"
+  | "AI_GENERATION_BLOCKED"
   | "AI_GENERATED_CONTENT_INVALID";
 
 export class ApplicationError extends Error {

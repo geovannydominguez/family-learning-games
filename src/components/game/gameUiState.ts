@@ -59,6 +59,9 @@ export function gameUiErrorMessage(error: unknown, fallback: string): string {
     if (error.code === "AI_GENERATION_FAILED") {
       return "No pudimos crear el juego en este momento. Inténtalo más tarde.";
     }
+    if (error.code === "AI_GENERATION_BLOCKED") {
+      return "No pudimos crear este juego. Intenta nuevamente o prueba con otro tema.";
+    }
     if (error.code === "NETWORK_ERROR") {
       return "No pudimos conectar con el servicio. Revisa tu conexión e inténtalo otra vez.";
     }

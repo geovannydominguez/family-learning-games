@@ -16,6 +16,48 @@ structural) and non-blocking `warning` severities (distractor quality), decided
 by Application from the code. Easy distractors in a young-children "easy" quiz
 are not a failure.
 
+**Revision 9 (bug fix, not architecture):** repair rounds now feed the generator
+the text of **every question seen so far this operation** — accepted, rejected by
+Nova Pro, rejected deterministically, or generated in an earlier round and then
+discarded — not just the accepted pool. Application keeps a monotonically growing
+`seen` map (normalized key → first original text) alongside the accepted pool;
+`existingQuestions` on the repair request is built from `seen.values()`. The
+repair prompt block is firmer ("Generate exactly N NEW questions… do NOT repeat,
+rephrase, translate, reorder the options of, or make a trivial variant of any
+question below… each new question must cover a distinct fact or angle"). The
+deterministic `duplicate_text` guard is unchanged in responsibility (it still
+compares only against the **accepted** pool and the current round) but its
+comparison key is now normalized (case, accents, surrounding punctuation,
+collapsed whitespace) so trivial variants collide. Rationale: on a narrow topic
+("Mundiales de Futbol", easy) round 1 accepted 8 and rejected 2, but the
+generator only ever saw the 8, so every repair round it re-emitted questions that
+`duplicate_text` then rejected until `AI_GAME_GENERATION_EXHAUSTED` / 422. New
+observability field `seenQuestionCount` on `AI_GAME_GENERATION_ATTEMPT` and
+`AI_GAME_REPAIR_ROUND` (count only, no texts). `accepted` is still the only source
+of the final game; a rejected question never joins it. No change to models,
+ports, HTTP contracts, Guardrail, `guardrail_intervened` handling, technical
+retries, `MAX_REPAIR_ROUNDS`, or the Lambda timeout.
+
+**Revision 8 (bug fix, not architecture):** a Bedrock Guardrail intervention
+(`stopReason = "guardrail_intervened"` / `content_filtered`) is now classified as
+a **deterministic policy decision**, not a transient technical fault. It no longer
+consumes a same-round technical retry and no longer lets the repair loop continue:
+the block is recorded once (`ai_generation_failure` diagnostic +
+`AI_GAME_GUARDRAIL_INTERVENED` event, now carrying `retryable: false`) and the
+whole operation finalizes immediately with a new application error
+`AI_GENERATION_BLOCKED` → **HTTP 422**, `GameRepository.create` count 0. Rationale:
+generation runs at `temperature: 0` and the block is driven by the request/topic
+itself (e.g. World-Cup topics whose output trips `sensitiveInformationPolicy` /
+`ADDRESS`), so an identical immediate retry — and every further repair round —
+is blocked the same way; the previous behaviour issued ~10 identical blocked
+Bedrock calls and drove the Lambda to its 28 s timeout. `provider_error`
+(throttling / transport / retriable 5xx) and malformed output
+(`invalid_json` / `invalid_shape`) keep their one bounded same-round technical
+retry. Guardrail infrastructure, both models, ports, and the repair/validation
+pipeline are unchanged. The frontend maps `AI_GENERATION_BLOCKED` to a friendly
+Spanish message; guardrail id/version/policy/filter tokens stay in observability
+only and never reach the browser.
+
 **Revision 3:** retries are **question-level repair rounds**, not whole-draft
 regeneration. Valid questions are kept; only failed slots are re-requested.
 `GameRepository.create` is still called exactly once, only after ten unique valid
@@ -27,8 +69,10 @@ generation yields candidates that can be evaluated. A failure that produces **no
 candidate content** (guardrail block, transport error, malformed response) gets a
 bounded same-round retry first: `MAX_TECHNICAL_RETRIES_PER_ROUND = 1`, retrying
 the SAME repair round. A `provider_error` that also fails its retry fails closed
-(`AI_GENERATION_FAILED` / 502); a guardrail/malformed failure that persists past
-the retry consumes the round (the loop stays bounded).
+(`AI_GENERATION_FAILED` / 502); a malformed failure that persists past the retry
+consumes the round (the loop stays bounded). *(Revision 8: a guardrail block is
+no longer part of this "no candidate content" retry path — it aborts the whole
+operation at once with `AI_GENERATION_BLOCKED` / 422.)*
 
 **Revision 7 (quality-driven configuration change, not architecture):** the
 generator model is `amazon.nova-lite-v1:0`, changed from `amazon.nova-micro-v1:0`.
@@ -170,7 +214,8 @@ feedback travels as neutral `previousIssues` and `existingQuestions` hints on
 ### Repair prompt hygiene
 
 The repair user message is deliberately minimal: the requested count, the
-accepted question **texts** (for de-duplication only — never options or
+**texts of every question seen so far this operation** (Revision 9 — accepted,
+rejected, or generated-then-discarded; for de-duplication only, never options or
 `isCorrect`), and stable application issue codes (`ANSWER_MISMATCH`,
 `AMBIGUOUS_QUESTION`, `duplicate_text`, …). It carries **no** reviewer
 chain-of-thought, no free-form validator `reason` text, and no
@@ -217,9 +262,10 @@ repeat up to MAX_REPAIR_ROUNDS = 5:
                        the prompt requests `missing`, the parser and the service
                        reject any other length as unexpected_question_count)
     (up to MAX_TECHNICAL_RETRIES_PER_ROUND = 1 same-round retry
-                       on a no-content failure: guardrail / transport / malformed)
+                       on a no-content TECHNICAL failure: transport / malformed;
+                       a guardrail block instead aborts now → AI_GENERATION_BLOCKED / 422)
     → per-question structural validation      (valid ones survive; a broken one is just that slot)
-    → uniqueness vs the accepted pool         (duplicate text → that candidate only is rejected)
+    → uniqueness vs the accepted pool         (normalized key; duplicate text → that candidate only is rejected)
     → Nova Pro blind solve of the survivors   (never sees the marked answer)
     → per-question deterministic compare      (match + confident + !ambiguous + no error issue → accept)
   accepted += newly accepted
@@ -281,9 +327,10 @@ prompts, model output, question/answer text, or personal data):
 `guardrailFilterTypes` (e.g. `["PROMPT_ATTACK"]`), `guardrailActions`. The
 flagged word, PII `match`, configured topic `name`, and model output are never
 read. The same fields (plus `technicalRetry`) are added to the existing
-`ai_generation_failure` diagnostic. A guardrail block on its first occurrence in
-a round is retried (same round); only a block that persists past the technical
-retry consumes the content-repair round. Since Revision 6 the input Guardrail
+`ai_generation_failure` diagnostic. *(Revision 8: a guardrail block is recorded
+once and then finalizes the operation with `AI_GENERATION_BLOCKED` / 422 — it is
+never retried in the same round and never lets the repair loop continue; the
+event now also carries `retryable: false`.)* Since Revision 6 the input Guardrail
 sees only the guarded topic block, so a `PROMPT_ATTACK` here now means the
 **topic itself** was flagged, not our repair prompt — `AI_GAME_GUARDRAIL_INTERVENED`
 with `guardrailFilterTypes: ["PROMPT_ATTACK"]` on repair rounds should no longer
@@ -319,9 +366,10 @@ wrong-key rejection is diagnosable from logs.
 - **Cost / success rate**: content-repair rounds are bounded by
   `MAX_REPAIR_ROUNDS = 5` and each round by `MAX_TECHNICAL_RETRIES_PER_ROUND = 1`
   — worst case ~10 generator + 5 Nova Pro calls, though repair rounds ask for
-  only the missing questions (small calls). The point of the change: a request
-  that previously exhausted because a guardrail block ate a repair round now
-  retries that round and keeps making progress toward ten accepted questions.
+  only the missing questions (small calls). *(Revision 8: a guardrail block short-
+  circuits this fan-out entirely — one blocked call, then `AI_GENERATION_BLOCKED`
+  / 422 — so a policy-blocked topic can no longer push the Lambda to its
+  timeout.)*
 - **Latency**: two sequential Bedrock calls per round; repair rounds send far
   fewer questions. The existing 28 s Lambda timeout is unchanged; worst-case
   repair fan-out may not fit in it, which is acceptable for a throttled,

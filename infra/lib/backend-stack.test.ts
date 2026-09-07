@@ -125,7 +125,9 @@ test("provisions one guarded Bedrock integration with scoped IAM when enabled by
       PiiEntitiesConfig: Match.arrayWith([
         Match.objectLike({ Type: "EMAIL", Action: "BLOCK" }),
         Match.objectLike({ Type: "PHONE", Action: "BLOCK" }),
-        Match.objectLike({ Type: "ADDRESS", Action: "BLOCK" }),
+        // ADDRESS is detect-only (no action): educational topics legitimately name
+        // countries, cities, and stadiums, so blocking on it produced false positives.
+        Match.objectLike({ Type: "ADDRESS", Action: "NONE" }),
       ])
     },
   });

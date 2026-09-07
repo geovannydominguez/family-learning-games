@@ -518,7 +518,7 @@ test("classifies technical provider faults as provider_error without a rule or l
   assert.equal(JSON.stringify(diagnostics).includes("secret"), false);
 });
 
-test("surfaces safe guardrail stop reasons and never records prompts, topics, or answers", async () => {
+test("a guardrail block finalizes as AI_GENERATION_BLOCKED without a technical retry or extra rounds", async () => {
   const diagnostics: GenerationFailureDiagnostic[] = [];
   const generator = generatorFrom(() => {
     throw new InvalidGeneratedGameCandidateError({ failureType: "guardrail_intervened", stopReason: "guardrail_intervened" });
@@ -531,16 +531,19 @@ test("surfaces safe guardrail stop reasons and never records prompts, topics, or
       questionCount: 10,
       playerId: "amelia",
     }),
-    (error: unknown) => error instanceof ApplicationError && error.code === "AI_GENERATED_CONTENT_INVALID",
+    (error: unknown) => error instanceof ApplicationError && error.code === "AI_GENERATION_BLOCKED",
   );
 
-  assert.equal(diagnostics.length, 10); // 5 rounds × (1 initial + 1 technical retry) for a guardrail block
-  for (const diagnostic of diagnostics) {
-    assert.equal(diagnostic.failureType, "guardrail_intervened");
-    assert.equal(diagnostic.stopReason, "guardrail_intervened");
-    assert.equal("validationRule" in diagnostic, false);
-    assert.equal("validationField" in diagnostic, false);
-  }
+  // A Guardrail block is deterministic and request-driven: exactly ONE generator
+  // call, no same-round technical retry, no cascade of identical calls.
+  assert.equal(generator.calls.length, 1);
+  assert.equal(diagnostics.length, 1);
+  const [diagnostic] = diagnostics;
+  assert.equal(diagnostic.failureType, "guardrail_intervened");
+  assert.equal(diagnostic.stopReason, "guardrail_intervened");
+  assert.equal("technicalRetry" in diagnostic, false);
+  assert.equal("validationRule" in diagnostic, false);
+  assert.equal("validationField" in diagnostic, false);
   const serialized = JSON.stringify(diagnostics);
   assert.equal(serialized.includes("sensitive-secret-topic"), false);
   assert.equal(serialized.includes("Question 0"), false);
@@ -1195,9 +1198,11 @@ test("repair 2: nine valid + one ANSWER_MISMATCH → keep nine, ask for one repl
   assert.equal(generator.calls.length, 2);
   assert.equal(generator.calls[0].questionCount, 10);
   assert.equal(generator.calls[1].questionCount, 1); // only the failed slot is regenerated
+  // The exclusion list is every question SEEN in round 1 — the 9 accepted AND the
+  // rejected "Question 0" — so Nova Lite is told not to reproduce that one either.
   assert.deepEqual([...(generator.calls[1].existingQuestions ?? [])].sort(), [
-    "Question 1", "Question 2", "Question 3", "Question 4", "Question 5",
-    "Question 6", "Question 7", "Question 8", "Question 9",
+    "Question 0", "Question 1", "Question 2", "Question 3", "Question 4",
+    "Question 5", "Question 6", "Question 7", "Question 8", "Question 9",
   ]);
   assert.equal(validator.calls.length, 2);
   assert.equal(validator.calls[1].draft.questions.length, 1);
@@ -1297,6 +1302,99 @@ test("repair 6: a replacement that duplicates an accepted question is rejected a
     && (event.issueTypes ?? []).includes("duplicate_text")));
 });
 
+test("v0.5.1: round 1 (8 accepted / 2 rejected) → round 2 asks for exactly 2 with every seen question excluded → 10 persisted", async () => {
+  const generator = generatorFrom((request, call) => (call === 1
+    ? makeDraft() // "Question 0".."Question 9"
+    : draftWithQuestionTexts(["Nuevo hecho A", "Nuevo hecho B"].slice(0, request.questionCount))));
+  const validator = validatorFrom(reviewRejecting(["Question 0", "Question 1"])); // ANSWER_MISMATCH on 2 slots
+  const { service, repository, events } = serviceWith(generator, validator);
+
+  const game = await service.generate(generateCommand);
+
+  assert.equal(generator.calls.length, 2);
+  assert.equal(generator.calls[1].questionCount, 2); // exactly the missing count
+  // the generator is given ALL ten round-1 texts as exclusion context — the 8
+  // accepted AND the 2 rejected — not just the accepted pool.
+  assert.deepEqual([...(generator.calls[1].existingQuestions ?? [])].sort(), [
+    "Question 0", "Question 1", "Question 2", "Question 3", "Question 4",
+    "Question 5", "Question 6", "Question 7", "Question 8", "Question 9",
+  ]);
+  assert.equal(validator.calls.length, 2);
+  assert.deepEqual(repository.created, [game]);
+  assert.equal(game.questions.length, 10);
+  assert.equal(new Set(game.questions.map((question) => question.text)).size, 10);
+  assert.ok(game.questions.some((question) => question.text === "Nuevo hecho A"));
+  assert.ok(game.questions.some((question) => question.text === "Nuevo hecho B"));
+  // a rejected question never enters the accepted pool / final game.
+  assert.equal(game.questions.some((question) => question.text === "Question 0" || question.text === "Question 1"), false);
+  const repair = events.filter((event) => event.event === "AI_GAME_REPAIR_ROUND");
+  assert.equal(repair[0].seenQuestionCount, 10);
+  assert.equal(repair[1].requestedQuestionCount, 2);
+  const attempts = events.filter((event) => event.event === "AI_GAME_GENERATION_ATTEMPT");
+  assert.equal(attempts[0].seenQuestionCount, 0);
+  assert.equal(attempts[1].seenQuestionCount, 10);
+});
+
+test("the exclusion set grows monotonically: a question generated and rejected in round 2 is excluded from round 3", async () => {
+  const generator = generatorFrom((_request, call) => {
+    if (call === 1) return makeDraft(); // Q0 rejected → 9 accepted
+    if (call === 2) return draftWithQuestionTexts(["Intento fallido"]); // rejected by Nova Pro
+    return draftWithQuestionTexts(["Pregunta final"]); // round 3 → accepted
+  });
+  const validator = validatorFrom(reviewRejecting(["Question 0", "Intento fallido"]));
+  const { service, repository } = serviceWith(generator, validator);
+
+  const game = await service.generate(generateCommand);
+
+  assert.equal(generator.calls.length, 3);
+  const round3Exclusions = [...(generator.calls[2].existingQuestions ?? [])];
+  assert.ok(round3Exclusions.includes("Question 0")); // round-1 rejected
+  assert.ok(round3Exclusions.includes("Intento fallido")); // round-2 generated then rejected
+  assert.equal(round3Exclusions.length, 11); // Q0..Q9 + "Intento fallido"
+  assert.deepEqual(repository.created, [game]);
+  assert.equal(game.questions.length, 10);
+  assert.equal(game.questions.some((question) => question.text === "Intento fallido"), false);
+});
+
+test("a generator that keeps repeating an accepted question exhausts controlled, without re-reviewing the duplicate", async () => {
+  const generator = generatorFrom((_request, call) => (call === 1
+    ? makeDraft() // Q0 rejected → 9 accepted
+    : draftWithQuestionTexts(["Question 5"]))); // always a duplicate of an accepted question
+  const validator = validatorFrom(reviewRejecting(["Question 0"]));
+  const { service, repository, events } = serviceWith(generator, validator);
+
+  await assert.rejects(
+    service.generate(generateCommand),
+    (error: unknown) => error instanceof ApplicationError && error.code === "AI_GENERATED_CONTENT_INVALID",
+  );
+
+  assert.equal(repository.created.length, 0);
+  assert.equal(generator.calls.length, 5); // maxAttempts still respected
+  assert.equal(validator.calls.length, 1); // rounds 2..5 blocked deterministically → Nova Pro not re-run
+  const dup = events.filter((event) => event.event === "AI_GAME_VALIDATION_REJECTED"
+    && (event.issueTypes ?? []).includes("duplicate_text"));
+  assert.equal(dup.length, 4);
+  assert.equal(events.at(-1)?.event, "AI_GAME_GENERATION_EXHAUSTED");
+});
+
+test("duplicate_text catches a trivial case / whitespace variant of an accepted question", async () => {
+  const generator = generatorFrom((_request, call) => {
+    if (call === 1) return makeDraft();
+    if (call === 2) return draftWithQuestionTexts(["  question 5 "]); // same as accepted "Question 5" once normalized
+    return draftWithQuestionTexts(["Distinct new question"]);
+  });
+  const validator = validatorFrom(reviewRejecting(["Question 0"]));
+  const { service, repository, events } = serviceWith(generator, validator);
+
+  const game = await service.generate(generateCommand);
+
+  assert.deepEqual(repository.created, [game]);
+  assert.equal(generator.calls.length, 3); // round 2's near-duplicate rejected, round 3 recovers
+  assert.ok(events.some((event) => event.event === "AI_GAME_VALIDATION_REJECTED"
+    && (event.issueTypes ?? []).includes("duplicate_text")));
+  assert.equal(game.questions.some((question) => question.text.trim() === "question 5"), false);
+});
+
 function guardrailFailure(): InvalidGeneratedGameCandidateError {
   return new InvalidGeneratedGameCandidateError({
     failureType: "guardrail_intervened",
@@ -1331,62 +1429,85 @@ function serviceWithLogs(
   return { service, repository, events, diagnostics };
 }
 
-test("A. guardrail block on a repair round, then a successful technical retry in the SAME round", async () => {
-  // round 2: guardrail block → technical retry → generation succeeds → round 2 completes.
-  const generator = generatorFrom((_request, call) => {
-    if (call === 1) return makeDraft();          // round 1 → 9 accepted (Q0 rejected)
-    if (call === 2) throw guardrailFailure();    // round 2 attempt 0 → blocked
-    return draftWithQuestionTexts(["retry recovered question"]); // round 2 technical retry → succeeds
-  });
-  const validator = validatorFrom(reviewRejecting(["Question 0"]));
-  const { service, repository, events } = serviceWithLogs(generator, validator);
+test("A. guardrail block on the first round: finalize immediately, never touch Nova Pro or a repair round", async () => {
+  const generator = generatorFrom(() => { throw guardrailFailure(); });
+  const validator = validatorFrom();
+  const { service, repository, events, diagnostics } = serviceWithLogs(generator, validator);
 
-  const game = await service.generate(generateCommand);
+  await assert.rejects(
+    service.generate(generateCommand),
+    (error: unknown) => error instanceof ApplicationError && error.code === "AI_GENERATION_BLOCKED",
+  );
 
-  assert.deepEqual(repository.created, [game]);
-  assert.equal(game.questions.length, 10);
-  assert.equal(generator.calls.length, 3);   // r1 + (r2 blocked + r2 retry)
-  assert.equal(validator.calls.length, 2);   // r1 + r2-after-retry
-  // exactly one AI_GAME_REPAIR_ROUND per round — the guardrail block did NOT consume round 2
-  const repairRounds = events.filter((event) => event.event === "AI_GAME_REPAIR_ROUND");
-  assert.deepEqual(repairRounds.map((event) => event.round), [1, 2]);
-  assert.equal(repairRounds[1].acceptedCount, 1);
-  assert.equal(repairRounds[1].missingCount, 0);
-  // the block was still logged, on round 2, technicalRetry 0
+  assert.equal(repository.created.length, 0);
+  // exactly one generator call — no same-round technical retry, no further rounds
+  assert.equal(generator.calls.length, 1);
+  // the generation was blocked before any candidate existed, so the semantic
+  // validator (Nova Pro) is never invoked and no repair round is accounted for
+  assert.equal(validator.calls.length, 0);
+  assert.equal(events.some((event) => event.event === "AI_GAME_REPAIR_ROUND"), false);
+  assert.equal(events.some((event) => event.event === "AI_GAME_GENERATION_EXHAUSTED"), false);
+  const attempts = events.filter((event) => event.event === "AI_GAME_GENERATION_ATTEMPT");
+  assert.deepEqual(attempts.map((event) => event.technicalRetry), [0]);
   const guardrail = events.filter((event) => event.event === "AI_GAME_GUARDRAIL_INTERVENED");
   assert.equal(guardrail.length, 1);
-  assert.equal(guardrail[0].round, 2);
+  assert.equal(guardrail[0].round, 1);
   assert.equal(guardrail[0].technicalRetry, 0);
-  assert.equal(guardrail[0].requestedQuestionCount, 1);
+  assert.equal(guardrail[0].retryable, false);
+  assert.equal(guardrail[0].requestedQuestionCount, 10);
+  assert.equal(guardrail[0].guardrailId, "gr-abc");
+  assert.equal(guardrail[0].guardrailVersion, "3");
   assert.deepEqual(guardrail[0].guardrailFilterTypes, ["PROMPT_ATTACK"]);
-  // two ATTEMPT events for round 2 (technicalRetry 0 and 1)
-  const round2Attempts = events.filter((event) => event.event === "AI_GAME_GENERATION_ATTEMPT" && event.round === 2);
-  assert.deepEqual(round2Attempts.map((event) => event.technicalRetry), [0, 1]);
-  // the 9 questions accepted in round 1 are preserved
-  assert.equal(game.questions.filter((question) => question.text.startsWith("Question ")).length, 9);
+  assert.equal(guardrail[0].generatorModel, "amazon.nova-lite-v1:0");
+  assert.equal(guardrail[0].validatorModel, "amazon.nova-pro-v1:0");
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].failureType, "guardrail_intervened");
 });
 
-test("B. technical retry exhausted on a persistent guardrail block: no infinite retry, no partial persistence", async () => {
+test("B. guardrail block on a repair round: abort at once, discard the accepted pool, no partial persistence", async () => {
   const generator = generatorFrom((_request, call) => (call === 1 ? makeDraft() : (() => { throw guardrailFailure(); })()));
   const validator = validatorFrom(reviewRejecting(["Question 0"])); // round 1 → 9 accepted
   const { service, repository, events, diagnostics } = serviceWithLogs(generator, validator);
 
   await assert.rejects(
     service.generate(generateCommand),
-    (error: unknown) => error instanceof ApplicationError && error.code === "AI_GENERATED_CONTENT_INVALID",
+    (error: unknown) => error instanceof ApplicationError && error.code === "AI_GENERATION_BLOCKED",
   );
 
   assert.equal(repository.created.length, 0);
-  // rounds 2..5 each: 1 initial + 1 technical retry, both blocked, then the round is consumed
-  assert.equal(generator.calls.length, 1 + 4 * 2);
+  // round 1 generation + round 2 generation (blocked). No retry of the blocked
+  // call, no rounds 3..5, so the operation returns well before maxAttempts.
+  assert.equal(generator.calls.length, 2);
+  assert.equal(validator.calls.length, 1); // round 1 only
   const guardrail = events.filter((event) => event.event === "AI_GAME_GUARDRAIL_INTERVENED");
-  assert.equal(guardrail.length, 8);
-  assert.deepEqual(guardrail.map((event) => event.technicalRetry), [0, 1, 0, 1, 0, 1, 0, 1]);
-  assert.equal(diagnostics.filter((diagnostic) => diagnostic.failureType === "guardrail_intervened").length, 8);
+  assert.equal(guardrail.length, 1);
+  assert.equal(guardrail[0].round, 2);
+  assert.equal(guardrail[0].technicalRetry, 0);
+  assert.equal(guardrail[0].retryable, false);
+  assert.equal(guardrail[0].requestedQuestionCount, 1);
+  assert.equal(diagnostics.filter((diagnostic) => diagnostic.failureType === "guardrail_intervened").length, 1);
   const serialized = JSON.stringify({ events, diagnostics });
   assert.equal(serialized.includes("Question 0"), false);
-  assert.equal(events.at(-1)?.event, "AI_GAME_GENERATION_EXHAUSTED");
-  assert.equal(events.at(-1)?.acceptedQuestionCount, 9);
+  assert.equal(events.some((event) => event.event === "AI_GAME_GENERATION_EXHAUSTED"), false);
+});
+
+test("B2. a transient provider fault still gets its bounded technical retry and can recover", async () => {
+  // first call → throttling-style transport fault; retry in the SAME round succeeds.
+  const generator = generatorFrom((_request, call) => {
+    if (call === 1) throw new Error("ThrottlingException: rate exceeded");
+    return makeDraft();
+  });
+  const { service, repository, events, diagnostics } = serviceWithLogs(generator, validatorFrom());
+
+  const game = await service.generate(generateCommand);
+
+  assert.deepEqual(repository.created, [game]);
+  assert.equal(game.questions.length, 10);
+  assert.equal(generator.calls.length, 2); // 1 initial + 1 same-round technical retry
+  assert.equal(events.some((event) => event.event === "AI_GAME_GUARDRAIL_INTERVENED"), false);
+  const attempts = events.filter((event) => event.event === "AI_GAME_GENERATION_ATTEMPT" && event.round === 1);
+  assert.deepEqual(attempts.map((event) => event.technicalRetry), [0, 1]);
+  assert.deepEqual(diagnostics.map((diagnostic) => diagnostic.failureType), ["provider_error"]);
 });
 
 test("C. five content-repair rounds progressively assemble exactly ten questions", async () => {
