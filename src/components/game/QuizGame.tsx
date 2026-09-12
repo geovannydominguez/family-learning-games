@@ -3,9 +3,20 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
 import type { AnswerFeedback, GameSetupResponse, PublicGame, PublicGameSession } from "@/application/game/gameSessionContracts";
-import type { Category, Difficulty, Player } from "@/domain/game/types";
+import type { Category, Difficulty } from "@/domain/game/types";
+import type { Player } from "@/domain/player/types";
 import { createGameApiClient } from "@/infrastructure/http/GameApiClient";
 import { buildStartSessionCommand, createdGameDifficulty, gameUiErrorMessage, selectCreatedGames } from "./gameUiState";
+
+interface PlayerFormState {
+  open: boolean;
+  mode: "create" | "edit";
+  playerId?: string;
+  name: string;
+  age: string;
+}
+
+const closedPlayerForm: PlayerFormState = { open: false, mode: "create", name: "", age: "" };
 
 type FlowStep = "home" | "player" | "category" | "difficulty" | "generate" | "game";
 
@@ -21,6 +32,11 @@ const difficultyLabel = (id: Difficulty): string =>
 export function QuizGame() {
   const [setup, setSetup] = useState<GameSetupResponse | null>(null);
   const [step, setStep] = useState<FlowStep>("home");
+  const [players, setPlayers] = useState<Player[] | null>(null);
+  const [loadingPlayers, setLoadingPlayers] = useState(true);
+  const [playerForm, setPlayerForm] = useState<PlayerFormState>(closedPlayerForm);
+  const [submittingPlayer, setSubmittingPlayer] = useState(false);
+  const [pendingDeletePlayerId, setPendingDeletePlayerId] = useState<string | null>(null);
   const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
   const [selectedGameId, setSelectedGameId] = useState<string | undefined>();
@@ -61,7 +77,20 @@ export function QuizGame() {
     }
   }, []);
 
+  const loadPlayers = useCallback(async () => {
+    setLoadingPlayers(true);
+    try {
+      setPlayers(await createGameApiClient().listPlayers());
+    } catch (caught) {
+      setPlayers(null);
+      setError(gameUiErrorMessage(caught, "No pudimos cargar los jugadores."));
+    } finally {
+      setLoadingPlayers(false);
+    }
+  }, []);
+
   useEffect(() => { void loadSetup(); }, [loadSetup]);
+  useEffect(() => { void loadPlayers(); }, [loadPlayers]);
   useEffect(() => {
     if (step === "category") void loadCreatedGames();
   }, [step, loadCreatedGames]);
@@ -70,7 +99,7 @@ export function QuizGame() {
   }, [session?.currentQuestionIndex, session?.status, step]);
 
   function choosePlayer(playerId: string) {
-    const player = setup?.players.find((candidate) => candidate.id === playerId);
+    const player = players?.find((candidate) => candidate.playerId === playerId);
     if (!player) return setError("No pudimos encontrar ese jugador. Elige uno de la lista.");
     setSelectedPlayer(player);
     setSelectedCategory(null);
@@ -79,6 +108,63 @@ export function QuizGame() {
     setSession(null);
     setError(null);
     setStep("category");
+  }
+
+  function openCreatePlayerForm() {
+    setError(null);
+    setPlayerForm({ open: true, mode: "create", name: "", age: "" });
+  }
+
+  function openEditPlayerForm(player: Player) {
+    setError(null);
+    setPlayerForm({ open: true, mode: "edit", playerId: player.playerId, name: player.name, age: String(player.age) });
+  }
+
+  function closePlayerForm() {
+    setPlayerForm(closedPlayerForm);
+  }
+
+  async function submitPlayerForm(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = playerForm.name.trim();
+    const age = Number(playerForm.age);
+    if (!name || name.length > 50 || !Number.isInteger(age) || age < 3 || age > 99) {
+      setError("Escribe un nombre de hasta 50 caracteres y una edad entre 3 y 99 años.");
+      return;
+    }
+    setSubmittingPlayer(true);
+    setError(null);
+    try {
+      if (playerForm.mode === "edit" && playerForm.playerId) {
+        await createGameApiClient().updatePlayer(playerForm.playerId, { name, age });
+      } else {
+        await createGameApiClient().createPlayer({ name, age });
+      }
+      closePlayerForm();
+      await loadPlayers();
+    } catch (caught) {
+      setError(gameUiErrorMessage(caught, "No pudimos guardar el jugador."));
+    } finally {
+      setSubmittingPlayer(false);
+    }
+  }
+
+  async function removePlayer(playerId: string) {
+    setSubmittingPlayer(true);
+    setError(null);
+    try {
+      await createGameApiClient().deletePlayer(playerId);
+      setPendingDeletePlayerId(null);
+      if (selectedPlayer?.playerId === playerId) {
+        setSelectedPlayer(null);
+        setStep("player");
+      }
+      await loadPlayers();
+    } catch (caught) {
+      setError(gameUiErrorMessage(caught, "No pudimos eliminar el jugador."));
+    } finally {
+      setSubmittingPlayer(false);
+    }
   }
 
   function chooseCategory(categoryId: string) {
@@ -101,7 +187,7 @@ export function QuizGame() {
     setError(null);
     try {
       const started = await createGameApiClient().startSession(buildStartSessionCommand(
-        selectedPlayer.id,
+        selectedPlayer.playerId,
         category.id,
         difficulty,
         gameId,
@@ -149,7 +235,7 @@ export function QuizGame() {
         topic,
         difficulty: generationDifficulty,
         questionCount: 10,
-        playerId: selectedPlayer.id,
+        playerId: selectedPlayer.playerId,
       });
       setGeneratedGame(game);
       setSelectedCategory(game.category);
@@ -216,8 +302,23 @@ export function QuizGame() {
   }
 
   if (step === "player") return (
-    <SelectionLayout headingRef={headingRef} eyebrow="Paso 1 de 3" title="¿Quién va a jugar?" description="Elige un jugador para personalizar la partida." error={error} onBack={() => setStep("home")}>
-      <div className="grid gap-4 sm:grid-cols-2">{setup.players.map((player) => <button key={player.id} type="button" onClick={() => choosePlayer(player.id)} className="selection-card"><span className="text-6xl" aria-hidden="true">{player.avatar}</span><span className="mt-3 text-2xl font-black text-slate-900">{player.name}</span></button>)}</div>
+    <SelectionLayout headingRef={headingRef} eyebrow="Paso 1 de 3" title="¿Quién va a jugar?" description="Elige un perfil familiar o crea uno nuevo." error={error} onBack={() => setStep("home")}>
+      <PlayerProfilesPanel
+        players={players}
+        loading={loadingPlayers}
+        submitting={submittingPlayer}
+        form={playerForm}
+        pendingDeleteId={pendingDeletePlayerId}
+        onChoose={choosePlayer}
+        onEdit={openEditPlayerForm}
+        onRequestDelete={setPendingDeletePlayerId}
+        onCancelDelete={() => setPendingDeletePlayerId(null)}
+        onConfirmDelete={(playerId) => void removePlayer(playerId)}
+        onOpenCreate={openCreatePlayerForm}
+        onCancelForm={closePlayerForm}
+        onFormChange={setPlayerForm}
+        onSubmitForm={(event) => void submitPlayerForm(event)}
+      />
     </SelectionLayout>
   );
 
@@ -245,7 +346,7 @@ export function QuizGame() {
   );
 
   if (step === "difficulty") return (
-    <SelectionLayout headingRef={headingRef} eyebrow={`${selectedPlayer?.avatar ?? ""} ${selectedPlayer?.name ?? ""} · ${selectedCategory?.icon ?? ""} ${selectedCategory?.name ?? ""}`} title="Elige la dificultad" description="La partida tendrá exactamente 10 preguntas." error={error} onBack={() => setStep("category")}>
+    <SelectionLayout headingRef={headingRef} eyebrow={`${selectedPlayer?.name ?? ""} · ${selectedCategory?.icon ?? ""} ${selectedCategory?.name ?? ""}`} title="Elige la dificultad" description="La partida tendrá exactamente 10 preguntas." error={error} onBack={() => setStep("category")}>
       <div className="grid gap-4 sm:grid-cols-3">{difficultyOptions.filter((option) => setup.difficulties.includes(option.id)).map((difficulty) => <button key={difficulty.id} type="button" disabled={submitting} onClick={() => void startGame(difficulty.id)} className="selection-card disabled:cursor-wait disabled:opacity-60"><span className="text-6xl" aria-hidden="true">{difficulty.icon}</span><span className="mt-3 block text-2xl font-black text-slate-900">{difficulty.label}</span><span className="mt-2 block text-base text-slate-600">{submitting ? "Iniciando…" : difficulty.description}</span></button>)}</div>
     </SelectionLayout>
   );
@@ -291,6 +392,92 @@ export function QuizGame() {
         <button type="button" onClick={nextQuestion} disabled={!pendingSession || submitting} className="button-primary mt-2 w-full disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500">{session.currentQuestionIndex === session.totalQuestions - 1 ? "Ver resultado" : "Siguiente pregunta"}</button>
       </section>
     </div></main>
+  );
+}
+
+interface PlayerProfilesPanelProps {
+  players: Player[] | null;
+  loading: boolean;
+  submitting: boolean;
+  form: PlayerFormState;
+  pendingDeleteId: string | null;
+  onChoose: (playerId: string) => void;
+  onEdit: (player: Player) => void;
+  onRequestDelete: (playerId: string) => void;
+  onCancelDelete: () => void;
+  onConfirmDelete: (playerId: string) => void;
+  onOpenCreate: () => void;
+  onCancelForm: () => void;
+  onFormChange: (updater: (current: PlayerFormState) => PlayerFormState) => void;
+  onSubmitForm: (event: FormEvent<HTMLFormElement>) => void;
+}
+
+function PlayerProfilesPanel({
+  players,
+  loading,
+  submitting,
+  form,
+  pendingDeleteId,
+  onChoose,
+  onEdit,
+  onRequestDelete,
+  onCancelDelete,
+  onConfirmDelete,
+  onOpenCreate,
+  onCancelForm,
+  onFormChange,
+  onSubmitForm,
+}: PlayerProfilesPanelProps) {
+  if (loading) return <p className="text-center text-lg text-slate-600">Cargando jugadores…</p>;
+  return (
+    <>
+      <div className="grid gap-4 sm:grid-cols-2">
+        {(players ?? []).map((player) => (
+          <div key={player.playerId} className="selection-card items-stretch text-left">
+            {pendingDeleteId === player.playerId ? (
+              <div className="flex flex-col items-center gap-3 py-2">
+                <p className="text-center text-lg font-bold text-slate-900">¿Eliminar a {player.name}?</p>
+                <div className="flex gap-3">
+                  <button type="button" className="button-secondary" onClick={onCancelDelete}>Cancelar</button>
+                  <button type="button" className="button-primary bg-rose-600 hover:bg-rose-700 focus-visible:ring-rose-300" disabled={submitting} onClick={() => onConfirmDelete(player.playerId)}>{submitting ? "Eliminando…" : "Eliminar"}</button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <button type="button" onClick={() => onChoose(player.playerId)} className="flex w-full flex-col items-center">
+                  <span className="flex h-16 w-16 items-center justify-center rounded-full bg-violet-100 text-3xl font-black text-violet-700" aria-hidden="true">{player.name.charAt(0).toUpperCase()}</span>
+                  <span className="mt-3 text-2xl font-black text-slate-900">{player.name}</span>
+                  <span className="mt-1 text-base text-slate-500">{player.age} años</span>
+                </button>
+                <div className="mt-4 flex justify-center gap-5 text-base font-bold text-violet-700">
+                  <button type="button" className="min-h-11 underline outline-none focus-visible:ring-4 focus-visible:ring-violet-300" onClick={() => onEdit(player)}>Editar</button>
+                  <button type="button" className="min-h-11 text-rose-700 underline outline-none focus-visible:ring-4 focus-visible:ring-rose-300" onClick={() => onRequestDelete(player.playerId)}>Eliminar</button>
+                </div>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="mt-8 border-t border-violet-100 pt-8">
+        {form.open ? (
+          <form className="mx-auto max-w-md" onSubmit={onSubmitForm}>
+            <h2 className="text-center text-xl font-black text-slate-900">{form.mode === "edit" ? "Editar jugador" : "Nuevo jugador"}</h2>
+            <label htmlFor="player-name" className="mt-4 block text-lg font-black text-slate-900">Nombre</label>
+            <input id="player-name" type="text" required maxLength={50} value={form.name} disabled={submitting} onChange={(event) => onFormChange((current) => ({ ...current, name: event.target.value }))} className="mt-2 min-h-14 w-full rounded-2xl border-2 border-violet-200 bg-white px-4 text-lg outline-none focus-visible:ring-4 focus-visible:ring-violet-300 disabled:opacity-60" />
+            <label htmlFor="player-age" className="mt-4 block text-lg font-black text-slate-900">Edad</label>
+            <input id="player-age" type="number" required min={3} max={99} value={form.age} disabled={submitting} onChange={(event) => onFormChange((current) => ({ ...current, age: event.target.value }))} className="mt-2 min-h-14 w-full rounded-2xl border-2 border-violet-200 bg-white px-4 text-lg outline-none focus-visible:ring-4 focus-visible:ring-violet-300 disabled:opacity-60" />
+            <div className="mt-6 flex justify-center gap-3">
+              <button type="button" className="button-secondary" disabled={submitting} onClick={onCancelForm}>Cancelar</button>
+              <button type="submit" className="button-primary" disabled={submitting}>{submitting ? "Guardando…" : "Guardar"}</button>
+            </div>
+          </form>
+        ) : (
+          <div className="text-center">
+            <button type="button" className="button-secondary" onClick={onOpenCreate}>+ Agregar jugador</button>
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 

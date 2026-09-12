@@ -16,6 +16,7 @@ export interface GameRecord {
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
+  generationMetadata?: Game["generationMetadata"];
 }
 
 const initialTimestamp = "2026-09-01T00:00:00.000Z";
@@ -45,6 +46,7 @@ export function gameDomainToRecord(
     sortOrder,
     createdAt: timestamp,
     updatedAt: timestamp,
+    ...(game.generationMetadata ? { generationMetadata: game.generationMetadata } : {}),
   };
 }
 
@@ -55,6 +57,7 @@ export function gameRecordToDomain(record: GameRecord): Game {
     category: record.category,
     players: record.players,
     questions: record.questions,
+    ...(record.generationMetadata ? { generationMetadata: record.generationMetadata } : {}),
   };
 }
 

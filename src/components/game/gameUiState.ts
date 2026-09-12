@@ -71,6 +71,15 @@ export function gameUiErrorMessage(error: unknown, fallback: string): string {
     if (error.code === "SESSION_NOT_FOUND") {
       return "La partida expiró. Inicia una nueva para continuar.";
     }
+    if (error.code === "INVALID_PLAYER") {
+      return "Escribe un nombre válido de hasta 50 caracteres.";
+    }
+    if (error.code === "INVALID_PLAYER_AGE") {
+      return "La edad debe ser un número entero entre 3 y 99 años.";
+    }
+    if (error.code === "PLAYER_NOT_FOUND") {
+      return "No encontramos ese jugador. Elige otro perfil de la lista.";
+    }
     return error.message;
   }
   return fallback;

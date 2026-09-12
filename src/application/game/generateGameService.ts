@@ -9,6 +9,7 @@ import type {
 } from "../../domain/game/types.ts";
 import type { GameRepository } from "../../repositories/game/GameRepository.ts";
 import { ApplicationError } from "../errors.ts";
+import type { PlayerRepository } from "../player/PlayerRepository.ts";
 import {
   InvalidGeneratedGameCandidateError,
   type GeneratedGameCandidateFailure,
@@ -160,6 +161,7 @@ export class GenerateGameService {
   private readonly generator: GameGenerator;
   private readonly validator: GameValidator;
   private readonly games: GameRepository;
+  private readonly players: PlayerRepository;
   private readonly enabled: boolean;
   private readonly createId: () => string;
   private readonly logDiagnostic: (diagnostic: GenerationFailureDiagnostic) => void;
@@ -172,11 +174,13 @@ export class GenerateGameService {
     generator: GameGenerator,
     validator: GameValidator,
     games: GameRepository,
+    players: PlayerRepository,
     options: GenerateGameServiceOptions,
   ) {
     this.generator = generator;
     this.validator = validator;
     this.games = games;
+    this.players = players;
     this.enabled = options.enabled;
     this.createId = options.createId ?? randomUUID;
     this.logDiagnostic = options.logDiagnostic ?? (() => {});
@@ -196,8 +200,10 @@ export class GenerateGameService {
 
     const normalizedCommand = validateCommand(command);
     const correlationId = safeCorrelationId(command.correlationId);
-    const players = await this.games.getPlayers();
-    const player = players.find(({ id }) => id === normalizedCommand.playerId);
+    // ADR-013: only `targetAge` crosses into `GenerateGameRequest` / the AI
+    // boundary. The player's identity (playerId, name) is resolved here, in
+    // Application, and never forwarded to `GameGenerator`/`GameValidator`.
+    const player = await this.players.getById(normalizedCommand.playerId);
     if (!player || !isValidAge(player.age)) {
       throw new ApplicationError("INVALID_GENERATION_REQUEST", "Generation request is invalid.");
     }
@@ -213,8 +219,12 @@ export class GenerateGameService {
       id: `ai-${this.createId()}`,
       title: built.title,
       category: built.category,
-      players,
+      // The legacy static player roster is no longer the source of "who is
+      // playing" (see GameSessionService); this field is not consulted for
+      // AI-generated games (`getPlayers()` already excludes them).
+      players: [],
       questions: built.questions,
+      generationMetadata: { targetAge: request.targetAge, difficulty: normalizedCommand.difficulty },
     };
 
     await this.games.create(game);

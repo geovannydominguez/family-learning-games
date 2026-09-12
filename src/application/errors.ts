@@ -9,7 +9,11 @@ export type ApplicationErrorCode =
   | "AI_GENERATION_DISABLED"
   | "AI_GENERATION_FAILED"
   | "AI_GENERATION_BLOCKED"
-  | "AI_GENERATED_CONTENT_INVALID";
+  | "AI_GENERATED_CONTENT_INVALID"
+  | "INVALID_PLAYER"
+  | "INVALID_PLAYER_AGE"
+  | "PLAYER_NOT_FOUND"
+  | "PLAYER_CONFLICT";
 
 export class ApplicationError extends Error {
   readonly code: ApplicationErrorCode;

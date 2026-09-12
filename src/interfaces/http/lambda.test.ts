@@ -6,6 +6,7 @@ import { createRuntimeRouter } from "./lambda.ts";
 const baseEnvironment = {
   GAMES_TABLE_NAME: "Games",
   GAME_SESSIONS_TABLE_NAME: "Sessions",
+  PLAYERS_TABLE_NAME: "Players",
 };
 
 const documentClient = { send: async () => ({ Items: [] }) };

@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { Category, Difficulty, Game, Player, Question } from "../../domain/game/types.ts";
+import type { Player as FamilyPlayer } from "../../domain/player/types.ts";
 import type { GameRepository } from "../../repositories/game/GameRepository.ts";
 import { ApplicationError, PersistenceError } from "../errors.ts";
+import type { PlayerRepository } from "../player/PlayerRepository.ts";
 import {
   InvalidGeneratedGameCandidateError,
   type GeneratedGameDraft,
@@ -24,6 +26,36 @@ import {
 } from "./generateGameService.ts";
 
 const players: Player[] = [{ id: "amelia", name: "Amelia", avatar: "A", age: 4 }];
+
+const defaultFamilyPlayer: FamilyPlayer = {
+  playerId: "amelia",
+  name: "Amelia",
+  age: 4,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+};
+
+/** Minimal `PlayerRepository` double: the ADR-013 boundary this service resolves `targetAge` through. */
+class StubPlayerRepository implements PlayerRepository {
+  private players: FamilyPlayer[];
+
+  constructor(players: FamilyPlayer[] = [defaultFamilyPlayer]) {
+    this.players = players;
+  }
+
+  async list(): Promise<FamilyPlayer[]> { return this.players; }
+  async getById(playerId: string): Promise<FamilyPlayer | null> {
+    return this.players.find((player) => player.playerId === playerId) ?? null;
+  }
+  async create(player: FamilyPlayer): Promise<FamilyPlayer> { this.players.push(player); return player; }
+  async update(player: FamilyPlayer): Promise<FamilyPlayer> {
+    this.players = this.players.map((candidate) => (candidate.playerId === player.playerId ? player : candidate));
+    return player;
+  }
+  async delete(playerId: string): Promise<void> {
+    this.players = this.players.filter((candidate) => candidate.playerId !== playerId);
+  }
+}
 
 /**
  * A structurally valid draft of exactly `count` questions. Generator mocks pass
@@ -137,8 +169,9 @@ function createService(
   enabled = true,
   diagnostics: GenerationFailureDiagnostic[] = [],
   validator: GameValidator = validatorFrom(),
+  playerRepository: PlayerRepository = new StubPlayerRepository(),
 ): GenerateGameService {
-  return new GenerateGameService(generator, validator, repository, {
+  return new GenerateGameService(generator, validator, repository, playerRepository, {
     enabled,
     createId: () => "123e4567-e89b-12d3-a456-426614174000",
     logDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
@@ -163,7 +196,9 @@ test("generates a normalized game with Application-owned identity", async () => 
   assert.equal(game.questions.length, 10);
   assert.equal(game.questions[0].text, "Question 0");
   assert.equal(game.questions[0].answers[0].text, "Answer 0");
-  assert.deepEqual(game.players, players);
+  // The legacy static roster is no longer sourced for AI-generated games (v0.6).
+  assert.deepEqual(game.players, []);
+  assert.deepEqual(game.generationMetadata, { targetAge: 4, difficulty: "easy" });
   assert.deepEqual(repository.created, [game]);
 });
 
@@ -191,15 +226,15 @@ test("rejects disabled and invalid requests without invoking the generator", asy
   }
 });
 
-test("resolves only the selected player's valid age before calling the generator", async () => {
+test("resolves only the selected player's age (via PlayerRepository) before calling the generator", async () => {
   const generator = generatorFrom(() => makeDraft());
-  const repository = new StubGameRepository();
-  repository.getPlayers = async () => [
-    { id: "amelia", name: "Amelia", avatar: "A", age: 4 },
-    { id: "other", name: "Other", avatar: "O", age: 9 },
-  ];
+  const validator = validatorFrom();
+  const playerRepository = new StubPlayerRepository([
+    defaultFamilyPlayer,
+    { playerId: "other", name: "Other", age: 9, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" },
+  ]);
 
-  await createService(generator, repository).generate({
+  await createService(generator, new StubGameRepository(), true, [], validator, playerRepository).generate({
     topic: "dinosaurs",
     difficulty: "easy",
     questionCount: 10,
@@ -207,24 +242,55 @@ test("resolves only the selected player's valid age before calling the generator
   });
 
   assert.deepEqual(generator.calls, [{ topic: "dinosaurs", difficulty: "easy", questionCount: 10, targetAge: 9 }]);
-  assert.deepEqual(repository.created[0].players, await repository.getPlayers());
+});
+
+/**
+ * ADR-013 / v0.6 privacy boundary: the object crossing into `GameGenerator`
+ * and `GameValidator` must carry only `topic`/`difficulty`/`questionCount`/
+ * `targetAge` (+ repair-round bookkeeping) — never the player's identity.
+ */
+test("never forwards playerId, player name, or a session identifier to the generator or validator", async () => {
+  const generator = generatorFrom(() => makeDraft());
+  const validator = validatorFrom();
+  const playerRepository = new StubPlayerRepository([
+    { playerId: "other", name: "Other", age: 9, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" },
+  ]);
+
+  await createService(generator, new StubGameRepository(), true, [], validator, playerRepository).generate({
+    topic: "dinosaurs",
+    difficulty: "easy",
+    questionCount: 10,
+    playerId: "other",
+    correlationId: "session-abc-123",
+  });
+
+  const forbiddenKeys = ["playerId", "player", "name", "sessionId", "correlationId"];
+  for (const call of generator.calls) {
+    for (const key of forbiddenKeys) assert.equal(Object.hasOwn(call, key), false, `generator call must not carry "${key}"`);
+  }
+  for (const call of validator.calls) {
+    for (const key of forbiddenKeys) assert.equal(Object.hasOwn(call, key), false, `validator call must not carry "${key}"`);
+  }
   assert.equal(JSON.stringify(generator.calls).includes("Other"), false);
-  assert.equal(JSON.stringify(generator.calls).includes("avatar"), false);
+  assert.equal(JSON.stringify(validator.calls).includes("Other"), false);
+  assert.equal(JSON.stringify(generator.calls).includes("other"), false);
+  assert.equal(JSON.stringify(generator.calls).includes("session-abc-123"), false);
 });
 
 test("rejects unknown players and invalid stored ages without calling the generator", async () => {
-  for (const playersForScenario of [
-    [{ id: "amelia", name: "Amelia", avatar: "A", age: 4 }],
-    [{ id: "amelia", name: "Amelia", avatar: "A", age: 0 }],
-    [{ id: "amelia", name: "Amelia", avatar: "A", age: 4.5 }],
-  ]) {
+  const scenarios: Array<{ players: FamilyPlayer[]; playerId: string }> = [
+    { players: [defaultFamilyPlayer], playerId: "missing" },
+    { players: [{ ...defaultFamilyPlayer, age: 0 }], playerId: "amelia" },
+    { players: [{ ...defaultFamilyPlayer, age: 4.5 }], playerId: "amelia" },
+  ];
+  for (const scenario of scenarios) {
     const generator = generatorFrom(() => makeDraft());
     const repository = new StubGameRepository();
-    repository.getPlayers = async () => playersForScenario;
-    const playerId = playersForScenario[0].age === 4 ? "missing" : "amelia";
+    const playerRepository = new StubPlayerRepository(scenario.players);
 
     await assert.rejects(
-      createService(generator, repository).generate({ topic: "dinosaurs", difficulty: "easy", questionCount: 10, playerId }),
+      createService(generator, repository, true, [], validatorFrom(), playerRepository)
+        .generate({ topic: "dinosaurs", difficulty: "easy", questionCount: 10, playerId: scenario.playerId }),
       (error: unknown) => error instanceof ApplicationError && error.code === "INVALID_GENERATION_REQUEST",
     );
     assert.equal(generator.calls.length, 0);
@@ -706,6 +772,7 @@ test("keeps game.id unique across generations while category.id stays stable", a
     generatorFrom(() => makeDraft()),
     validatorFrom(),
     new StubGameRepository(),
+    new StubPlayerRepository(),
     { enabled: true, createId: () => `uuid-${(counter += 1)}` },
   );
 
@@ -750,7 +817,7 @@ function serviceWith(
   repository = new StubGameRepository(),
   events: GenerationPipelineEvent[] = [],
 ): { service: GenerateGameService; repository: StubGameRepository; events: GenerationPipelineEvent[] } {
-  const service = new GenerateGameService(generator, validator, repository, {
+  const service = new GenerateGameService(generator, validator, repository, new StubPlayerRepository(), {
     enabled: true,
     createId: () => "123e4567-e89b-12d3-a456-426614174000",
     logEvent: (event) => events.push(event),
@@ -1119,7 +1186,7 @@ test("a configurable attempt budget bounds the Generate → Validate cycles", as
   const generator = generatorFrom(() => makeDraft());
   const validator = validatorFrom(disagreeingReview);
   const repository = new StubGameRepository();
-  const service = new GenerateGameService(generator, validator, repository, {
+  const service = new GenerateGameService(generator, validator, repository, new StubPlayerRepository(), {
     enabled: true,
     createId: () => "id",
     maxAttempts: 2,
@@ -1419,7 +1486,7 @@ function serviceWithLogs(
   const events: GenerationPipelineEvent[] = [];
   const diagnostics: GenerationFailureDiagnostic[] = [];
   const repository = new StubGameRepository();
-  const service = new GenerateGameService(generator, validator, repository, {
+  const service = new GenerateGameService(generator, validator, repository, new StubPlayerRepository(), {
     enabled: true,
     createId: () => "id",
     logEvent: (event) => events.push(event),
@@ -1631,7 +1698,7 @@ test("batch-size bug fix: a 10-question response to a 1-question repair is rejec
     return makeDraft(10); // repair round ignores the batch size and over-generates
   });
   const validator = validatorFrom(reviewRejecting(["Question 0"]));
-  const service = new GenerateGameService(generator, validator, new StubGameRepository(), {
+  const service = new GenerateGameService(generator, validator, new StubGameRepository(), new StubPlayerRepository(), {
     enabled: true,
     createId: () => "123e4567-e89b-12d3-a456-426614174000",
     logEvent: (event) => events.push(event),

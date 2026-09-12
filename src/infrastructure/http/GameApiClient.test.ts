@@ -137,3 +137,38 @@ test("requires a configured URL and translates API, network and invalid JSON fai
   const invalid = new GameApiClient("https://api.example.com", async () => new Response("not-json", { status: 200 }));
   await assert.rejects(invalid.getSetup(), (error: unknown) => error instanceof GameApiError && error.code === "INVALID_RESPONSE");
 });
+
+test("listPlayers unwraps the players envelope from GET /players", async () => {
+  const requests: Array<{ input: string; method?: string }> = [];
+  const players = [{ playerId: "amelia", name: "Amelia", age: 4, createdAt: "t", updatedAt: "t" }];
+  const client = new GameApiClient("https://api.example.com", async (input, init) => {
+    requests.push({ input: String(input), method: init?.method });
+    return new Response(JSON.stringify({ players }), { status: 200, headers: { "content-type": "application/json" } });
+  });
+
+  assert.deepEqual(await client.listPlayers(), players);
+  assert.equal(requests[0].input, "https://api.example.com/players");
+  assert.equal(requests[0].method, "GET");
+});
+
+test("createPlayer, updatePlayer and deletePlayer send the expected requests", async () => {
+  const requests: Array<{ input: string; method?: string; body?: unknown }> = [];
+  const client = new GameApiClient("https://api.example.com", async (input, init) => {
+    requests.push({ input: String(input), method: init?.method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    return new Response(JSON.stringify({ playerId: "amelia", name: "Amelia", age: 4, createdAt: "t", updatedAt: "t" }), { status: 200, headers: { "content-type": "application/json" } });
+  });
+
+  await client.createPlayer({ name: "Amelia", age: 4 });
+  assert.equal(requests[0].input, "https://api.example.com/players");
+  assert.equal(requests[0].method, "POST");
+  assert.deepEqual(requests[0].body, { name: "Amelia", age: 4 });
+
+  await client.updatePlayer("amelia", { name: "Amelia Rose", age: 5 });
+  assert.equal(requests[1].input, "https://api.example.com/players/amelia");
+  assert.equal(requests[1].method, "PUT");
+  assert.deepEqual(requests[1].body, { name: "Amelia Rose", age: 5 });
+
+  await client.deletePlayer("amelia");
+  assert.equal(requests[2].input, "https://api.example.com/players/amelia");
+  assert.equal(requests[2].method, "DELETE");
+});

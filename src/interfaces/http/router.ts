@@ -2,6 +2,7 @@ import { ApplicationError, PersistenceError } from "../../application/errors.ts"
 import type { GenerateGameService } from "../../application/game/generateGameService.ts";
 import type { GameSessionService } from "../../application/game/gameSessionService.ts";
 import type { PublicGame } from "../../application/game/gameSessionContracts.ts";
+import type { PlayerService } from "../../application/player/playerService.ts";
 import type { Difficulty, Game } from "../../domain/game/types.ts";
 import type { GameRepository } from "../../repositories/game/GameRepository.ts";
 import type { HttpRequest, HttpResponse, RequestLog } from "./contracts.ts";
@@ -9,6 +10,7 @@ import type { HttpRequest, HttpResponse, RequestLog } from "./contracts.ts";
 interface RouterDependencies {
   games: GameRepository;
   sessionService: GameSessionService;
+  playerService: PlayerService;
   generationService?: GenerateGameService;
   log?: (record: RequestLog) => void;
   now?: () => number;
@@ -20,6 +22,7 @@ const jsonHeaders = { "content-type": "application/json; charset=utf-8" };
 export function createHttpRouter({
   games,
   sessionService,
+  playerService,
   generationService,
   log = (record) => console.log(JSON.stringify(record)),
   now = Date.now,
@@ -29,7 +32,7 @@ export function createHttpRouter({
     let response: HttpResponse;
     let caughtError: unknown;
     try {
-      response = await route(request, games, sessionService, generationService);
+      response = await route(request, games, sessionService, playerService, generationService);
     } catch (error) {
       caughtError = error;
       response = mapError(error);
@@ -80,12 +83,17 @@ function readRouteContext(request: HttpRequest): { operation: string; resourceId
   if (request.method === "GET" && request.path === "/game-setup") return { operation: "get-game-setup" };
   if (request.method === "POST" && request.path === "/game-sessions") return { operation: "start-game-session" };
   if (request.method === "POST" && request.path === "/games/generate") return { operation: "generate-game" };
+  if (request.method === "GET" && request.path === "/players") return { operation: "list-players" };
+  if (request.method === "POST" && request.path === "/players") return { operation: "create-player" };
   const game = request.path.match(/^\/games\/([^/]+)$/);
   if (request.method === "GET" && game) return withResource("get-game", game[1]);
   const answer = request.path.match(/^\/game-sessions\/([^/]+)\/answers$/);
   if (request.method === "POST" && answer) return withResource("submit-answer", answer[1]);
   const session = request.path.match(/^\/game-sessions\/([^/]+)$/);
   if (request.method === "GET" && session) return withResource("get-game-session", session[1]);
+  const player = request.path.match(/^\/players\/([^/]+)$/);
+  if (request.method === "PUT" && player) return withResource("update-player", player[1]);
+  if (request.method === "DELETE" && player) return withResource("delete-player", player[1]);
   return { operation: "unknown-route" };
 }
 
@@ -102,6 +110,7 @@ async function route(
   request: HttpRequest,
   games: GameRepository,
   sessionService: GameSessionService,
+  playerService: PlayerService,
   generationService: GenerateGameService | undefined,
 ): Promise<HttpResponse> {
   if (request.method === "GET" && request.path === "/games") {
@@ -151,6 +160,24 @@ async function route(
   if (request.method === "GET" && sessionRoute) {
     return json(200, await sessionService.get(decodeURIComponent(sessionRoute[1])));
   }
+  if (request.method === "GET" && request.path === "/players") {
+    return json(200, { players: await playerService.list() });
+  }
+  if (request.method === "POST" && request.path === "/players") {
+    const body = parseObject(request.body);
+    return json(201, await playerService.create({ name: body.name, age: body.age }));
+  }
+  const playerRoute = request.path.match(/^\/players\/([^/]+)$/);
+  if (request.method === "PUT" && playerRoute) {
+    const body = parseObject(request.body);
+    const playerId = decodeURIComponent(playerRoute[1]);
+    return json(200, await playerService.update({ playerId, name: body.name, age: body.age }));
+  }
+  if (request.method === "DELETE" && playerRoute) {
+    const playerId = decodeURIComponent(playerRoute[1]);
+    await playerService.delete(playerId);
+    return json(200, { playerId });
+  }
   return json(404, { error: { code: "RESOURCE_NOT_FOUND", message: "Route was not found." } });
 }
 
@@ -160,6 +187,7 @@ function toPublicGame(game: Game): PublicGame {
     title: game.title,
     category: game.category,
     difficulties: difficulties.filter((difficulty) => game.questions.some((question) => question.difficulty === difficulty)),
+    ...(game.generationMetadata ? { generationMetadata: game.generationMetadata } : {}),
     questions: game.questions.map((question) => ({
       id: question.id,
       categoryId: question.categoryId,
@@ -218,6 +246,8 @@ function applicationErrorStatus(code: ApplicationError["code"]): number {
   switch (code) {
     case "INVALID_REQUEST":
     case "INVALID_GENERATION_REQUEST":
+    case "INVALID_PLAYER":
+    case "INVALID_PLAYER_AGE":
       return 400;
     case "AI_GENERATED_CONTENT_INVALID":
     // A Guardrail block is a permanent, request-specific refusal (not a transient
@@ -229,11 +259,13 @@ function applicationErrorStatus(code: ApplicationError["code"]): number {
     case "INVALID_SESSION_STATE":
     case "SESSION_CONFLICT":
     case "GAME_ID_CONFLICT":
+    case "PLAYER_CONFLICT":
       return 409;
     case "AI_GENERATION_FAILED":
       return 502;
     case "AI_GENERATION_DISABLED":
       return 503;
+    case "PLAYER_NOT_FOUND":
     default:
       return 404;
   }

@@ -45,6 +45,9 @@ test("maps generation failures to friendly UI messages without provider details"
     { error: new GameApiError("AI_GENERATED_CONTENT_INVALID", "raw", 422), expected: /contenido válido/i },
     { error: new GameApiError("AI_GENERATION_FAILED", "provider secret", 502), expected: /crear el juego/i },
     { error: new GameApiError("AI_GENERATION_BLOCKED", "blocked by content safety rules", 422), expected: /prueba con otro tema/i },
+    { error: new GameApiError("INVALID_PLAYER", "raw", 400), expected: /nombre válido/i },
+    { error: new GameApiError("INVALID_PLAYER_AGE", "raw", 400), expected: /entre 3 y 99/i },
+    { error: new GameApiError("PLAYER_NOT_FOUND", "raw", 404), expected: /otro perfil/i },
   ];
 
   for (const scenario of cases) {

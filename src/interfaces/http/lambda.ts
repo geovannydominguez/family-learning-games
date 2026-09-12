@@ -9,10 +9,12 @@ import type { GameGenerator } from "../../application/game/GameGenerator.ts";
 import type { GameValidator } from "../../application/game/GameValidator.ts";
 import { GenerateGameService } from "../../application/game/generateGameService.ts";
 import { GameSessionService } from "../../application/game/gameSessionService.ts";
+import { PlayerService } from "../../application/player/playerService.ts";
 import { BedrockGameGenerator } from "../../infrastructure/ai/BedrockGameGenerator.ts";
 import { BedrockGameValidator } from "../../infrastructure/ai/BedrockGameValidator.ts";
 import { DynamoDbGameRepository } from "../../infrastructure/repositories/DynamoDbGameRepository.ts";
 import { DynamoDbGameSessionRepository } from "../../infrastructure/repositories/DynamoDbGameSessionRepository.ts";
+import { DynamoDbPlayerRepository } from "../../infrastructure/repositories/DynamoDbPlayerRepository.ts";
 import { createHttpRouter } from "./router.ts";
 
 interface RuntimeRouterOptions {
@@ -32,9 +34,12 @@ export function createRuntimeRouter({
 }: RuntimeRouterOptions = {}) {
   const gamesTableName = requireConfiguration("GAMES_TABLE_NAME", environment);
   const gameSessionsTableName = requireConfiguration("GAME_SESSIONS_TABLE_NAME", environment);
+  const playersTableName = requireConfiguration("PLAYERS_TABLE_NAME", environment);
   const enabled = environment.AI_GAME_GENERATION_ENABLED === "true";
   const games = new DynamoDbGameRepository(documentClient, gamesTableName);
   const sessions = new DynamoDbGameSessionRepository(documentClient, gameSessionsTableName);
+  const players = new DynamoDbPlayerRepository(documentClient, playersTableName);
+  const playerService = new PlayerService(players);
   let generator: GameGenerator = {
     generate: async () => { throw new Error("AI generator is disabled."); },
   };
@@ -65,8 +70,9 @@ export function createRuntimeRouter({
 
   return createHttpRouter({
     games,
-    sessionService: new GameSessionService(games, sessions),
-    generationService: new GenerateGameService(generator, validator, games, {
+    sessionService: new GameSessionService(games, sessions, players),
+    playerService,
+    generationService: new GenerateGameService(generator, validator, games, players, {
       enabled,
       createId,
       logDiagnostic: (diagnostic) => console.log(JSON.stringify(diagnostic)),

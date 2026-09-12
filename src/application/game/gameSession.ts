@@ -18,6 +18,8 @@ interface QuestionSelection {
 interface CreateGameSessionInput {
   gameId?: string;
   player: Player;
+  /** The persistent family player profile id associated with this session (v0.6, optional). */
+  playerId?: string;
   category: Category;
   difficulty: Difficulty;
   questions: Question[];
@@ -56,6 +58,7 @@ export function selectQuestions(
 export function createGameSession({
   gameId,
   player,
+  playerId,
   category,
   difficulty,
   questions,
@@ -65,6 +68,7 @@ export function createGameSession({
     gameId: gameId ?? category.id,
     revision: 0,
     player,
+    ...(playerId ? { playerId } : {}),
     category,
     difficulty,
     questions: selectQuestions(
@@ -141,6 +145,7 @@ export function restartGameSession(
   return createGameSession({
     gameId: session.gameId,
     player: session.player,
+    playerId: session.playerId,
     category: session.category,
     difficulty: session.difficulty,
     questions,

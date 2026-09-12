@@ -64,6 +64,14 @@ export class FamilyLearningGamesBackendStack extends Stack {
       billingMode: BillingMode.PAY_PER_REQUEST,
       removalPolicy: RemovalPolicy.DESTROY,
     });
+    // v0.6 — ADR-012: persistent family player profiles. Family-scale volume,
+    // so no GSI (a Scan backs `GET /players`, see architecture doc).
+    const playersTable = new Table(this, "PlayersTable", {
+      tableName: `${resourcePrefix}-players`,
+      partitionKey: { name: "playerId", type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
     const logGroup = new LogGroup(this, "BackendLogs", {
       logGroupName: "/aws/lambda/family-learning-games-backend",
       retention: RetentionDays.ONE_WEEK,
@@ -72,6 +80,7 @@ export class FamilyLearningGamesBackendStack extends Stack {
     const backendEnvironment: Record<string, string> = {
       GAMES_TABLE_NAME: gamesTable.tableName,
       GAME_SESSIONS_TABLE_NAME: gameSessionsTable.tableName,
+      PLAYERS_TABLE_NAME: playersTable.tableName,
       AI_GAME_GENERATION_ENABLED: String(aiGameGenerationEnabled),
     };
     let guardrail: CfnGuardrail | undefined;
@@ -128,6 +137,11 @@ export class FamilyLearningGamesBackendStack extends Stack {
       actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"],
       resources: [gameSessionsTable.tableArn],
     }));
+    backend.addToRolePolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Scan"],
+      resources: [playersTable.tableArn],
+    }));
     if (guardrail) {
       backend.addToRolePolicy(new PolicyStatement({
         effect: Effect.ALLOW,
@@ -156,7 +170,7 @@ export class FamilyLearningGamesBackendStack extends Stack {
       apiName: "family-learning-games-api",
       corsPreflight: {
         allowOrigins: allowedOrigins,
-        allowMethods: [CorsHttpMethod.GET, CorsHttpMethod.POST, CorsHttpMethod.OPTIONS],
+        allowMethods: [CorsHttpMethod.GET, CorsHttpMethod.POST, CorsHttpMethod.PUT, CorsHttpMethod.DELETE, CorsHttpMethod.OPTIONS],
         allowHeaders: ["content-type"],
       },
     });
@@ -167,6 +181,9 @@ export class FamilyLearningGamesBackendStack extends Stack {
     api.addRoutes({ path: "/game-sessions", methods: [HttpMethod.POST], integration });
     api.addRoutes({ path: "/game-sessions/{sessionId}/answers", methods: [HttpMethod.POST], integration });
     api.addRoutes({ path: "/game-sessions/{sessionId}", methods: [HttpMethod.GET], integration });
+    // v0.6 — family player profile CRUD (ADR-012). Same HTTP API, same Lambda.
+    api.addRoutes({ path: "/players", methods: [HttpMethod.GET, HttpMethod.POST], integration });
+    api.addRoutes({ path: "/players/{playerId}", methods: [HttpMethod.PUT, HttpMethod.DELETE], integration });
     const defaultStage = api.defaultStage?.node.defaultChild;
     if (!(defaultStage instanceof CfnStage)) throw new Error("HTTP API default stage is unavailable.");
     const generationRouteResource = generationRoute.node.defaultChild;
@@ -183,6 +200,7 @@ export class FamilyLearningGamesBackendStack extends Stack {
     new CfnOutput(this, "FunctionName", { value: backend.functionName });
     new CfnOutput(this, "GamesTableName", { value: gamesTable.tableName });
     new CfnOutput(this, "GameSessionsTableName", { value: gameSessionsTable.tableName });
+    new CfnOutput(this, "PlayersTableName", { value: playersTable.tableName });
   }
 }
 

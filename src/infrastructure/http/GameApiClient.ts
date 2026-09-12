@@ -6,6 +6,12 @@ import type {
   SubmitAnswerResponse,
 } from "../../application/game/gameSessionContracts.ts";
 import type { GenerateGameCommand } from "../../application/game/GameGenerator.ts";
+import type {
+  CreatePlayerRequest,
+  PlayersListResponse,
+  UpdatePlayerRequest,
+} from "../../application/player/playerContracts.ts";
+import type { Player } from "../../domain/player/types.ts";
 
 interface ErrorEnvelope {
   error?: { code?: string; message?: string };
@@ -70,6 +76,23 @@ export class GameApiClient {
       method: "POST",
       body: JSON.stringify({ answerId }),
     });
+  }
+
+  async listPlayers(): Promise<Player[]> {
+    const { players } = await this.request<PlayersListResponse>("/players", { method: "GET" });
+    return players;
+  }
+
+  createPlayer(request: CreatePlayerRequest): Promise<Player> {
+    return this.request("/players", { method: "POST", body: JSON.stringify(request) });
+  }
+
+  updatePlayer(playerId: string, request: UpdatePlayerRequest): Promise<Player> {
+    return this.request(`/players/${encodeURIComponent(playerId)}`, { method: "PUT", body: JSON.stringify(request) });
+  }
+
+  async deletePlayer(playerId: string): Promise<void> {
+    await this.request(`/players/${encodeURIComponent(playerId)}`, { method: "DELETE" });
   }
 
   private async request<T>(path: string, init: RequestInit): Promise<T> {

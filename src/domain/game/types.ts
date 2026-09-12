@@ -40,6 +40,13 @@ export interface GameSession {
   gameId: string;
   revision: number;
   player: Player;
+  /**
+   * The persistent family player profile (see `domain/player/types.ts`)
+   * associated with this session, when started through the v0.6 flow.
+   * Optional so historical sessions created before v0.6 remain valid
+   * (FR-10/FR-12): they simply have no value here.
+   */
+  playerId?: string;
   category: Category;
   difficulty: Difficulty;
   questions: Question[];
@@ -56,6 +63,15 @@ export interface Game {
   category: Category;
   players: Player[];
   questions: Question[];
+  /**
+   * The generation context a game was created with (v0.6). Preserved so a
+   * game's original age/difficulty context survives later profile edits
+   * (ADR-013's historical-behavior rule). Never carries player identity.
+   */
+  generationMetadata?: {
+    targetAge?: number;
+    difficulty?: Difficulty;
+  };
 }
 
 export interface Result {

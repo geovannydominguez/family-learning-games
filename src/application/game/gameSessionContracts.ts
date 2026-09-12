@@ -24,11 +24,17 @@ export interface PublicGame {
   category: Category;
   difficulties: Difficulty[];
   questions: PublicGameQuestion[];
+  generationMetadata?: {
+    targetAge?: number;
+    difficulty?: Difficulty;
+  };
 }
 
 export interface PublicGameSession {
   id: string;
   player: Player;
+  /** The persistent family player profile associated with this session (v0.6, optional for historical sessions). */
+  playerId?: string;
   category: Category;
   difficulty: Difficulty;
   currentQuestionIndex: number;

@@ -5,13 +5,13 @@ import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { FamilyLearningGamesBackendStack } from "./backend-stack.ts";
 
-test("defines the default-disabled Lambda, seven-route HTTP API, durable tables and least-privilege access", () => {
+test("defines the default-disabled Lambda, eleven-route HTTP API, durable tables and least-privilege access", () => {
   const app = new App({ context: { frontendOrigin: "https://family.example.com" } });
   const template = Template.fromStack(new FamilyLearningGamesBackendStack(app, "TestStack"));
   template.resourceCountIs("AWS::Lambda::Function", 1);
   template.resourceCountIs("AWS::ApiGatewayV2::Api", 1);
-  template.resourceCountIs("AWS::ApiGatewayV2::Route", 7);
-  template.resourceCountIs("AWS::DynamoDB::Table", 2);
+  template.resourceCountIs("AWS::ApiGatewayV2::Route", 11);
+  template.resourceCountIs("AWS::DynamoDB::Table", 3);
   template.resourceCountIs("AWS::Logs::LogGroup", 1);
   template.hasResourceProperties("AWS::Lambda::Function", { Runtime: "nodejs22.x", Timeout: 10 });
   template.hasResourceProperties("AWS::Lambda::Function", {
@@ -19,6 +19,7 @@ test("defines the default-disabled Lambda, seven-route HTTP API, durable tables 
       Variables: Match.objectLike({
         GAMES_TABLE_NAME: Match.anyValue(),
         GAME_SESSIONS_TABLE_NAME: Match.anyValue(),
+        PLAYERS_TABLE_NAME: Match.anyValue(),
         AI_GAME_GENERATION_ENABLED: "false",
       })
     }
@@ -32,16 +33,22 @@ test("defines the default-disabled Lambda, seven-route HTTP API, durable tables 
   template.hasResourceProperties("AWS::ApiGatewayV2::Route", { RouteKey: "POST /game-sessions" });
   template.hasResourceProperties("AWS::ApiGatewayV2::Route", { RouteKey: "POST /game-sessions/{sessionId}/answers" });
   template.hasResourceProperties("AWS::ApiGatewayV2::Route", { RouteKey: "GET /game-sessions/{sessionId}" });
+  template.hasResourceProperties("AWS::ApiGatewayV2::Route", { RouteKey: "GET /players" });
+  template.hasResourceProperties("AWS::ApiGatewayV2::Route", { RouteKey: "POST /players" });
+  template.hasResourceProperties("AWS::ApiGatewayV2::Route", { RouteKey: "PUT /players/{playerId}" });
+  template.hasResourceProperties("AWS::ApiGatewayV2::Route", { RouteKey: "DELETE /players/{playerId}" });
   template.hasResourceProperties("AWS::DynamoDB::Table", { BillingMode: "PAY_PER_REQUEST", KeySchema: [{ AttributeName: Match.anyValue(), KeyType: "HASH" }] });
   template.allResourcesProperties("AWS::DynamoDB::Table", Match.objectLike({ BillingMode: "PAY_PER_REQUEST" }));
   template.hasResourceProperties("AWS::DynamoDB::Table", { TableName: "dev-family-learning-games-games" });
   template.hasResourceProperties("AWS::DynamoDB::Table", { TableName: "dev-family-learning-games-game-sessions" });
+  template.hasResourceProperties("AWS::DynamoDB::Table", { TableName: "dev-family-learning-games-players", KeySchema: [{ AttributeName: "playerId", KeyType: "HASH" }] });
   template.hasResource("AWS::DynamoDB::Table", { DeletionPolicy: "Delete", UpdateReplacePolicy: "Delete" });
   template.hasResourceProperties("AWS::IAM::Policy", {
     PolicyDocument: {
       Statement: Match.arrayWith([
         Match.objectLike({ Action: ["dynamodb:GetItem", "dynamodb:Scan"], Effect: "Allow" }),
         Match.objectLike({ Action: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"], Effect: "Allow" }),
+        Match.objectLike({ Action: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Scan"], Effect: "Allow" }),
       ])
     }
   });
@@ -65,6 +72,15 @@ test("defines the default-disabled Lambda, seven-route HTTP API, durable tables 
   template.hasResource("AWS::ApiGatewayV2::Stage", {
     DependsOn: Match.arrayWith([generationRouteLogicalId]),
   });
+  const playersTableLogicalId = Object.entries(template.findResources("AWS::DynamoDB::Table"))
+    .find(([, resource]) => resource.Properties.TableName === "dev-family-learning-games-players")?.[0];
+  assert.ok(playersTableLogicalId);
+  const playersStatement = Object.values(template.findResources("AWS::IAM::Policy"))
+    .flatMap((resource) => resource.Properties.PolicyDocument.Statement as Array<Record<string, unknown>>)
+    .find((statement) => Array.isArray(statement.Action) && (statement.Action as string[]).includes("dynamodb:DeleteItem"));
+  assert.ok(playersStatement);
+  assert.deepEqual((playersStatement!.Action as string[]).sort(), ["dynamodb:DeleteItem", "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Scan", "dynamodb:UpdateItem"]);
+  assert.equal(JSON.stringify(playersStatement!.Resource).includes(playersTableLogicalId!), true);
   for (const forbidden of ["AWS::Cognito::UserPool", "AWS::SQS::Queue", "AWS::EC2::VPC"]) template.resourceCountIs(forbidden, 0);
 });
 
@@ -74,8 +90,8 @@ test("provisions one guarded Bedrock integration with scoped IAM when enabled by
 
   template.resourceCountIs("AWS::Lambda::Function", 1);
   template.resourceCountIs("AWS::ApiGatewayV2::Api", 1);
-  template.resourceCountIs("AWS::ApiGatewayV2::Route", 7);
-  template.resourceCountIs("AWS::DynamoDB::Table", 2);
+  template.resourceCountIs("AWS::ApiGatewayV2::Route", 11);
+  template.resourceCountIs("AWS::DynamoDB::Table", 3);
   template.resourceCountIs("AWS::Bedrock::Guardrail", 1);
   template.resourceCountIs("AWS::Bedrock::GuardrailVersion", 1);
   template.hasResourceProperties("AWS::Lambda::Function", {
@@ -242,6 +258,7 @@ test("prefixes DynamoDB table names with the configured environment", () => {
 
   template.hasResourceProperties("AWS::DynamoDB::Table", { TableName: "test-family-learning-games-games" });
   template.hasResourceProperties("AWS::DynamoDB::Table", { TableName: "test-family-learning-games-game-sessions" });
+  template.hasResourceProperties("AWS::DynamoDB::Table", { TableName: "test-family-learning-games-players" });
 });
 
 test("defaults CORS to localhost when no origin context is supplied", () => {

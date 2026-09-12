@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 
-import type { Difficulty, GameSession } from "../../domain/game/types.ts";
+import type { Difficulty, GameSession, Player as LegacyGamePlayer } from "../../domain/game/types.ts";
 import type { GameRepository } from "../../repositories/game/GameRepository.ts";
 import { ApplicationError } from "../errors.ts";
+import type { PlayerRepository } from "../player/PlayerRepository.ts";
 import type { GameSessionRepository } from "./GameSessionRepository.ts";
 import { advanceSession, createGameSession, submitAnswer } from "./gameSession.ts";
 import type {
@@ -13,20 +14,31 @@ import type {
 
 const difficulties: readonly Difficulty[] = ["easy", "normal", "hard"];
 
+/**
+ * The persistent family `Player` (ADR-012) has no avatar. This session's
+ * embedded `player` (legacy shape, unchanged for compatibility with
+ * historical `GameSessions` records) still requires one for display, so a
+ * neutral constant is used instead of any family-specific media/avatar.
+ */
+const defaultSessionAvatar = "🙂";
+
 export class GameSessionService {
   private readonly games: GameRepository;
   private readonly sessions: GameSessionRepository;
+  private readonly players: PlayerRepository;
   private readonly createId: () => string;
   private readonly random: () => number;
 
   constructor(
     games: GameRepository,
     sessions: GameSessionRepository,
+    players: PlayerRepository,
     createId: () => string = randomUUID,
     random: () => number = Math.random,
   ) {
     this.games = games;
     this.sessions = sessions;
+    this.players = players;
     this.createId = createId;
     this.random = random;
   }
@@ -45,16 +57,32 @@ export class GameSessionService {
     if (game && game.category.id !== command.categoryId) {
       throw new ApplicationError("INVALID_REQUEST", "Game and category must match.");
     }
-    const player = game?.players.find((candidate) => candidate.id === command.playerId);
-    if (!game || !player) {
+    // `playerId` identifies a persistent family player profile (ADR-012), not
+    // an entry in the game's own (legacy, static) roster.
+    const familyPlayer = await this.players.getById(command.playerId);
+    if (!game || !familyPlayer) {
       throw new ApplicationError("RESOURCE_NOT_FOUND", "Player or category was not found.");
     }
+    const player: LegacyGamePlayer = {
+      id: familyPlayer.playerId,
+      name: familyPlayer.name,
+      avatar: defaultSessionAvatar,
+      age: familyPlayer.age,
+    };
     const category = game.category;
     const questions = game.questions.filter((question) => question.difficulty === command.difficulty);
 
     let session: GameSession;
     try {
-      session = createGameSession({ gameId: game.id, player, category, difficulty: command.difficulty, questions, random: this.random });
+      session = createGameSession({
+        gameId: game.id,
+        player,
+        playerId: familyPlayer.playerId,
+        category,
+        difficulty: command.difficulty,
+        questions,
+        random: this.random,
+      });
     } catch {
       throw new ApplicationError("INVALID_SESSION_STATE", "There is not enough content to start this game.");
     }
@@ -102,6 +130,7 @@ export function toPublicSession(id: string, session: GameSession): PublicGameSes
   return {
     id,
     player: session.player,
+    ...(session.playerId ? { playerId: session.playerId } : {}),
     category: session.category,
     difficulty: session.difficulty,
     currentQuestionIndex: session.currentQuestionIndex,
