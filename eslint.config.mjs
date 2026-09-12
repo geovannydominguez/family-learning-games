@@ -19,6 +19,9 @@ const eslintConfig = [
       "build/**",
       "cdk.out/**",
       "next-env.d.ts",
+      // Static assets only (icons, the offline fallback page, the Service
+      // Worker script) — not TypeScript/React application source.
+      "public/**",
     ],
   },
 ];

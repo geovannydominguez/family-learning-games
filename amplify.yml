@@ -14,3 +14,17 @@ frontend:
   cache:
     paths:
       - node_modules/**/*
+  # v0.7 (FASE 7 — PWA): make sure the Service Worker script and the Web App
+  # Manifest are always revalidated by the browser, so a redeployed
+  # sw.js/manifest is picked up promptly instead of being served stale from
+  # an intermediate HTTP cache. This is the only PWA-related Amplify Hosting
+  # change — no new AWS infrastructure. See ADR-014-pwa-online-first.md.
+  customHeaders:
+    - pattern: '/sw.js'
+      headers:
+        - key: 'Cache-Control'
+          value: 'no-cache, no-store, must-revalidate'
+    - pattern: '/manifest.webmanifest'
+      headers:
+        - key: 'Cache-Control'
+          value: 'no-cache'

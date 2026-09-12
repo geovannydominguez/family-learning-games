@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sin conexión · Family Learning Games</title>
+    <!--
+      Self-contained on purpose: this is the offline fallback served by the
+      Service Worker (see public/sw.js) when a navigation cannot reach the
+      network. It must not depend on any other request (CSS bundle, font,
+      icon file) succeeding, so all styling and the icon are inlined here.
+    -->
+    <style>
+      :root {
+        color-scheme: light;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 1.5rem;
+        font-family: Arial, Helvetica, sans-serif;
+        color: #172033;
+        background: #f5f3ff;
+        background-image: radial-gradient(circle at 10% 10%, rgba(254, 249, 195, 0.65), transparent 28%),
+          radial-gradient(circle at 90% 25%, rgba(221, 214, 254, 0.7), transparent 30%),
+          linear-gradient(180deg, #faf5ff 0%, #eff6ff 100%);
+      }
+      .card {
+        max-width: 26rem;
+        width: 100%;
+        text-align: center;
+        border-radius: 1.5rem;
+        border: 1px solid rgba(255, 255, 255, 0.8);
+        background: rgba(255, 255, 255, 0.92);
+        padding: 2.5rem 2rem;
+        box-shadow: 0 20px 40px -12px rgba(76, 29, 149, 0.25);
+      }
+      .icon {
+        width: 4.5rem;
+        height: 4.5rem;
+        margin: 0 auto 1.25rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 1.25rem;
+        background: #6d28d9;
+      }
+      h1 {
+        margin: 0 0 0.75rem;
+        font-size: 1.5rem;
+        font-weight: 900;
+      }
+      p {
+        margin: 0 0 0.5rem;
+        font-size: 1rem;
+        line-height: 1.5;
+        color: #3f3f66;
+      }
+      p:last-of-type {
+        margin-bottom: 0;
+      }
+      button {
+        margin-top: 1.5rem;
+        min-height: 3.25rem;
+        width: 100%;
+        border: none;
+        border-radius: 1rem;
+        background: #6d28d9;
+        color: #fff;
+        font-size: 1.05rem;
+        font-weight: 800;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #5b21b6;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="icon" aria-hidden="true">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path
+            d="M12 2 14.6 9.2 22 9.9 16.4 14.7 18.2 22 12 17.8 5.8 22 7.6 14.7 2 9.9 9.4 9.2 12 2Z"
+            fill="#ffffff"
+          />
+        </svg>
+      </div>
+      <h1>Sin conexión</h1>
+      <p>No podemos conectarnos en este momento.</p>
+      <p>Verifica tu conexión a Internet e intenta nuevamente.</p>
+      <button type="button" onclick="location.reload()">Reintentar</button>
+    </main>
+  </body>
+</html>
