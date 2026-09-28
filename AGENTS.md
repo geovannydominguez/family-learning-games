@@ -1,41 +1,59 @@
 # Family Learning Games — AGENTS.md
 
 ## Current target
-> **v0.5 — Public Deployment on AWS**
+> **v0.7.1 — AI generation quality and operational hardening**
 
 ## Current roadmap phase
-> **FASE 5 — Desplegar públicamente en AWS**
+> **FASE 7 — PWA** (completed)
+>
+> **v0.7.1** is a patch over the completed Phase 7 baseline, not a new phase.
 
 ## Mandatory documentation
-Before modifying code, read:
+Before modifying v0.7.1 code, read:
 
 1. `AGENTS.md`
-2. `docs/architecture/ARCHITECTURE-v0.5.md`
-3. `docs/architecture/ADR-010.md`
-4. `docs/architecture/REQUIREMENTS-v0.5.md`
+2. `docs/architecture/ARCHITECTURE-v0.7.1.md`
+3. `docs/architecture/ADR-015-claude-sonnet-ai-generation-quality.md`
+4. `docs/architecture/REQUIREMENTS-v0.7.1.md`
+5. `docs/architecture/ARCHITECTURE-v0.7.md`
+6. `docs/architecture/ADR-014-pwa-online-first.md`
+7. `docs/architecture/REQUIREMENTS-v0.7.md`
+8. ADR-011, ADR-012 and ADR-013 when touching AI generation, players, or AI personalization.
 
-Previous accepted architecture/ADRs remain relevant unless superseded. In particular, `ADR-009-ai-game-validation-and-identity.md` is unrelated to hosting and remains the accepted decision for AI-generated game validation and identity; `ADR-010.md` is the only ADR that decides AWS Amplify Hosting for the public frontend.
+Previous accepted architecture/ADRs remain relevant unless superseded. In particular:
+
+- `ADR-009-ai-game-validation-and-identity.md` remains the accepted decision for AI-generated game validation and identity.
+- `ADR-010.md` is the only ADR that decides AWS Amplify Hosting for the public frontend.
+- `ADR-011-two-model-ai-generation-pipeline.md` decides the two-model AI generation pipeline.
+- `ADR-012.md` decides persistent family player profiles.
+- `ADR-013.md` decides age-aware AI personalization derived from player profiles.
+- `ADR-014-pwa-online-first.md` decides the online-first PWA with controlled static caching.
+- `ADR-015-claude-sonnet-ai-generation-quality.md` evolves the ADR-011 AI pipeline implementation for v0.7.1: Claude Sonnet 4.6, stronger difficulty/diversity requirements, answer-order verification, bounded observability, and synchronous execution-budget awareness.
 
 ## Architecture
 
 ```text
 GitHub
    ↓
-AWS Amplify Hosting
+AWS Amplify Hosting (Route 53 → play.joamgames.com)
+   ↓
+Browser / Installed PWA
+   ├── Manifest + icons
+   └── Service Worker ──► Cache Storage (static assets + offline fallback only)
    ↓
 Next.js
    ↓
-GameApiClient
+GameApiClient                     (backend requests: NETWORK ONLY)
    ↓
 API Gateway HTTP API
    ↓
 AWS Lambda
    ↓
 Application
-   ├── GameGenerator ──► BedrockGameGenerator ──► Amazon Bedrock
-   └── Repository ports ──► DynamoDB repositories ──► DynamoDB
+   ├── GameGenerator / GameValidator ──► Bedrock adapters ──► Amazon Bedrock
+   └── Repository ports (Game, GameSession, Player) ──► DynamoDB repositories ──► DynamoDB
    ↓
-Domain
+Domain (game, player)
 ```
 
 ## Mandatory rules
@@ -58,6 +76,15 @@ AI-produced data is untrusted. Validate deeply before persistence.
 ### One game domain
 Seeded and generated games use the same `Game` and `GameSession`.
 
+### Players are a persisted domain entity
+`Player` (`playerId`, `name`, `age`, `createdAt`, `updatedAt`) is persisted through the `PlayerRepository` port and served by the existing backend Lambda. Players are family profiles, not user accounts: no authentication or authorization is attached to them.
+
+### AI personalization uses data minimization
+When a generation request carries `playerId`, Application resolves the player through `PlayerRepository` and derives `targetAge`. The AI boundary (`GameGenerator`, validator, Bedrock adapters) receives only `targetAge`; never `playerId`, player name, `sessionId`, or family metadata. The frontend must not send authoritative age when a `playerId` exists. `difficulty` remains independent from `targetAge`.
+
+### PWA is presentation-only and online-first
+The manifest, icons, Service Worker, and offline fallback belong exclusively to the frontend/browser layer. The Service Worker must not contain game, player, AI, or session rules, must never cache backend/API responses as application state, and must only delete caches it owns (`joam-static-*`). DynamoDB remains the only source of truth. Offline fallback is supported; offline gameplay is not. ADR-014 remains authoritative and unchanged: v0.7.1 must preserve the installable online-first PWA behavior and must not introduce offline gameplay or API/AI response caching.
+
 ## Identity rule
 `gameId = categoryId` is no longer a domain invariant. Existing seeded IDs remain valid. Generated games use unique IDs created by Application through an injected ID factory.
 
@@ -78,25 +105,27 @@ allowedOrigins   # CDK context, comma-separated list, takes precedence
 frontendOrigin   # CDK context, single origin, backward-compatible fallback
 ```
 
-Default is `http://localhost:3000` when neither is supplied. Do not remove local development support. Do not hardcode a specific Amplify-generated domain in code; pass it through `allowedOrigins` at deploy time instead. Never set an allowed origin to `*`.
+Default is `http://localhost:3000` when neither is supplied. Do not remove local development support. Do not hardcode a specific Amplify-generated domain or the production domain in code; pass them through `allowedOrigins` at deploy time instead (for example `http://localhost:3000,https://play.joamgames.com`). Never set an allowed origin to `*`.
 
 ## Deployment model
 Frontend deployment flows from GitHub through AWS Amplify Hosting:
 
 ```text
-git push → GitHub → Amplify build/deploy → public HTTPS URL
+git push → GitHub → Amplify build/deploy → https://play.joamgames.com
 ```
 
-Do not introduce GitHub Actions, CodePipeline, CodeBuild, Jenkins, ArgoCD, or Terraform to satisfy v0.5. Amplify's own GitHub integration handles checkout, install, build, and deploy. Connecting the GitHub repository to a new Amplify app is an interactive, account-owner action performed in the AWS Console; it is not automated by CDK in v0.5.
+The canonical production URL is `https://play.joamgames.com` (Route 53 custom domain attached to the Amplify app in the AWS Console). PWA files (`public/sw.js`, `public/offline.html`, `public/icons/`, `src/app/manifest.ts`) ship inside the same frontend artifact; `amplify.yml` only adds revalidation headers for `/sw.js` and `/manifest.webmanifest`.
+
+Do not introduce GitHub Actions, CodePipeline, CodeBuild, Jenkins, ArgoCD, or Terraform. Amplify's own GitHub integration handles checkout, install, build, and deploy. Connecting the GitHub repository to an Amplify app and attaching the custom domain are interactive, account-owner actions performed in the AWS Console; they are not automated by CDK.
 
 ## Circular CORS/Amplify dependency
-The Amplify public origin is only known after the Amplify app exists, but the backend must allow that origin. Resolve this explicitly, never by opening CORS with `*`:
+Applies when (re)creating the environment from scratch. The Amplify public origin is only known after the Amplify app exists, but the backend must allow that origin. Resolve this explicitly, never by opening CORS with `*`:
 
 ```text
 1. Deploy the backend (default/localhost-only CORS is fine initially).
 2. Create the Amplify app connected to GitHub and let it build once.
-3. Read the generated Amplify domain.
-4. Redeploy the backend with allowedOrigins including localhost and that domain.
+3. Read the generated Amplify domain and attach the custom domain (play.joamgames.com) in the Amplify Console.
+4. Redeploy the backend with allowedOrigins including localhost and the public origin(s).
 5. Set NEXT_PUBLIC_GAME_API_BASE_URL in Amplify and redeploy the frontend.
 6. Validate the public flow end to end.
 ```
@@ -108,36 +137,41 @@ Use configuration such as:
 
 ```text
 AI_GAME_GENERATION_ENABLED
-BEDROCK_GENERATOR_MODEL_ID   # amazon.nova-lite-v1:0
-BEDROCK_VALIDATOR_MODEL_ID   # amazon.nova-pro-v1:0
+BEDROCK_GENERATOR_MODEL_ID   # global.anthropic.claude-sonnet-4-6
+BEDROCK_VALIDATOR_MODEL_ID   # global.anthropic.claude-sonnet-4-6
 BEDROCK_REGION
 BEDROCK_GUARDRAIL_ID
 BEDROCK_GUARDRAIL_VERSION
 NEXT_PUBLIC_GAME_API_BASE_URL
 ```
 
-AI generation defaults to disabled. Bedrock generator/validator models, region, and Guardrail configuration are required only when it is enabled. See `ADR-011` for the two-model generation pipeline (Nova Lite drafts; Nova Pro blind-solves each question; Application deterministically compares answers before persistence).
+AI generation defaults to disabled. Bedrock generator/validator models, region, and Guardrail configuration are required only when it is enabled. The model IDs remain configuration and must not be hardcoded in Domain/Application.
+
+`ADR-011` continues to define the independent Generator/Validator pipeline and deterministic Application validation. `ADR-015` defines the v0.7.1 model/configuration and quality evolution.
 
 ## Persistence
-Use the existing `Games` and `GameSessions` tables. Do not introduce RDS, Aurora, S3-as-database, Redis, or ElastiCache to satisfy v0.5.
+Use the existing `Games`, `GameSessions`, and `Players` tables (`Players`: PK = `playerId`, no secondary indexes). Do not introduce RDS, Aurora, S3-as-database, Redis, or ElastiCache. The Service Worker cache and browser storage are not application persistence.
 
-## Allowed in v0.5
-- AWS Amplify Hosting for the Next.js frontend
-- `amplify.yml` only if it adds real value over Amplify's auto-detection
+## Allowed in the v0.7 baseline
+- AWS Amplify Hosting for the Next.js frontend, with the existing `play.joamgames.com` custom domain
+- `amplify.yml` only if it adds real value over Amplify's auto-detection (currently: build + PWA revalidation headers)
 - `.nvmrc` / Node version pinning for reproducible builds
 - CDK `allowedOrigins` / `frontendOrigin` CORS configuration
-- documentation of the manual GitHub↔Amplify connection steps
-- tests for CORS configuration, CDK behavior, and frontend configuration
-- small, coherent refactors strictly needed to support public deployment
+- documentation of the manual GitHub↔Amplify connection and custom domain steps
+- player profile CRUD through the existing Lambda/API and `Players` table
+- age-aware AI generation via `targetAge` resolved from `playerId`
+- Web App Manifest, PWA icons, Service Worker registration, versioned static caching (`joam-static-v*`), and offline fallback page
+- tests for CORS configuration, CDK behavior, player rules, PWA cache classification/registration, and frontend configuration
+- small, coherent refactors strictly needed to support the above
 
 ## Out of scope
 Do not add:
-- Cognito/auth, user registration, login, password recovery, JWT, family accounts, roles/permissions (FASE 6)
-- service workers, offline mode, installable app, web manifest as a feature, push notifications (FASE 7)
+- Cognito/auth, user registration, login, password recovery, JWT, user/family accounts, roles/permissions, per-player authorization
+- offline gameplay, offline session persistence, IndexedDB synchronization, Background Sync, push notifications/Web Push, cached API or Bedrock responses, native app packaging/store publication
 - Polly, S3 media, image/voice generation (FASE 8)
 - WebSockets, AppSync subscriptions, multiplayer/real-time state (FASE 9)
 - new game types (FASE 10)
-- a purchased/custom domain (the Amplify-managed domain is sufficient)
+- additional custom domains beyond `play.joamgames.com`
 - GitHub Actions, CodePipeline, CodeBuild, Jenkins, ArgoCD, Terraform
 - EC2, ECS, Fargate, EKS, manually managed S3+CloudFront, or a custom Lambda to serve the frontend
 - a second backend Lambda or a second API
@@ -154,6 +188,10 @@ POST /game-sessions
 GET  /game-sessions/{sessionId}
 POST /game-sessions/{sessionId}/answers
 POST /games/generate
+GET    /players
+POST   /players
+PUT    /players/{playerId}
+DELETE /players/{playerId}
 ```
 
 `answers[].isCorrect` must never be public.
@@ -170,18 +208,20 @@ private API keys / secrets
 
 Every `NEXT_PUBLIC_*` value must be assumed publicly visible from the browser. Only the public API base URL is appropriate there.
 
+Player identity (`playerId`, name) must never be sent to Bedrock. Service Worker caches must never store player data, game sessions, generated games, gameplay state, or AI results.
+
 ## Cost awareness
-Prefer serverless, managed, pay-per-use resources. Amplify Hosting, API Gateway, Lambda, DynamoDB on-demand, and Bedrock remain the only billable services introduced across v0.1–v0.5. Document any new potentially billable resource. Do not destroy or recreate existing stacks/tables to satisfy v0.5.
+Prefer serverless, managed, pay-per-use resources. Amplify Hosting, Route 53 (hosted zone/domain for `play.joamgames.com`), API Gateway, Lambda, DynamoDB on-demand, and Bedrock remain the only billable services introduced across v0.1–v0.7. Document any new potentially billable resource. Do not destroy or recreate existing stacks/tables.
 
 ## Testing
-Normal tests must not require live AWS/Amplify. Test CORS/allowed-origins parsing and CDK configuration, default-disabled behavior, route preservation, and frontend configuration. Do not add tests solely to raise coverage.
+Normal tests must not require live AWS/Amplify. Test CORS/allowed-origins parsing and CDK configuration, default-disabled behavior, route preservation, player validation and AI data minimization, PWA cache classification and Service Worker registration, and frontend configuration. PWA lifecycle behavior must be validated against a production build (`npm run build` + `npm run start`), not only `npm run dev`. Do not add tests solely to raise coverage.
 
 ## Workflow for coding agents
 
 1. Read docs.
-2. Inspect current v0.4 code and infrastructure.
+2. Inspect current v0.7 code and infrastructure.
 3. Preserve architectural boundaries and existing HTTP contracts.
-4. Identify the minimal CDK/config delta needed for public hosting and CORS.
+4. Identify the minimal code/CDK/config delta needed for the task.
 5. Add Amplify build configuration only if it adds real value.
 6. Update frontend/deployment documentation.
 7. Add/update tests together with code.
@@ -273,16 +313,19 @@ git diff --check
 ```
 
 ## Definition of Done
-v0.5 is complete when:
-- the frontend is deployable to AWS Amplify Hosting from the GitHub repository
-- the app is reachable over a public HTTPS URL without running `npm run dev`
+v0.7 (current baseline) is complete when:
+- the app loads normally at `https://play.joamgames.com`, deployed from GitHub through AWS Amplify Hosting
+- the Web App Manifest is valid and the app is installable (desktop and mobile) as JOAM Games with its icons
+- a Service Worker installs and activates, caches only static resources, and removes obsolete `joam-static-*` caches on activation
+- backend/API responses are never served from or persisted in the PWA cache
+- an uncached navigation while offline shows the controlled offline fallback, and restoring connectivity restores normal behavior
+- player profiles and age-aware AI generation keep working, with player identity never crossing the AI boundary
 - `NEXT_PUBLIC_GAME_API_BASE_URL` remains external configuration
-- CORS supports both `http://localhost:3000` and the public Amplify origin, configured explicitly (never `*`)
+- CORS supports `http://localhost:3000` and the public origin(s), configured explicitly (never `*`)
 - the existing backend Lambda, API routes, DynamoDB tables, and Bedrock integration are preserved unchanged in contract
-- the full seeded-game flow and, when enabled, AI generation work end to end through the public frontend
-- no Cognito, PWA, multimedia, or multiplayer feature was introduced
-- no custom domain is required
+- the full seeded-game flow, player flow, and, when enabled, AI generation work end to end through the public frontend
+- no auth, offline gameplay, multimedia, or multiplayer feature was introduced
 - validation commands pass
-- deployment documentation (backend CDK + manual Amplify/GitHub steps + CORS follow-up) is current
+- deployment documentation (backend CDK + manual Amplify/GitHub/custom domain steps + CORS follow-up) is current
 
-> **Publish what already works, without turning deployment into a new platform.**
+> **Installable online-first PWA with static offline fallback, not an offline-first application.**

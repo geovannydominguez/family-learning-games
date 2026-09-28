@@ -308,6 +308,8 @@ The Lambda IAM role allows `bedrock:InvokeModel` on exactly the two
 `foundation-model/amazon.nova-pro-v1:0` ARNs (no `bedrock:*`, no `Resource: "*"`).
 The Guardrail applies to both models.
 
+If a configured model ID is a cross-region inference profile (`global.`, `us.`, `eu.`, …), the grant instead targets that `inference-profile` ARN plus the underlying `foundation-model` ARNs the profile may route to (region-less for `global.`).
+
 ---
 
 ## Observability
@@ -373,7 +375,9 @@ wrong-key rejection is diagnosable from logs.
 - **Latency**: two sequential Bedrock calls per round; repair rounds send far
   fewer questions. The existing 28 s Lambda timeout is unchanged; worst-case
   repair fan-out may not fit in it, which is acceptable for a throttled,
-  user-triggered route that fails closed.
+  user-triggered route that fails closed. Since v0.7.1 (ADR-015) an
+  execution budget decides whether each further round can start, so
+  `MAX_REPAIR_ROUNDS` is an upper bound, not a guarantee.
 - No Step Functions, SQS, EventBridge, extra Lambda, async workflow, or new
   DynamoDB table. Runs inside the current backend Lambda.
 - Frontend, HTTP contracts, DynamoDB schema, `GameRepository`, `Game`,

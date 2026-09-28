@@ -128,6 +128,7 @@ async function route(
       questionCount: body.questionCount as number,
       playerId: body.playerId as string,
       correlationId: request.requestId,
+      ...(request.remainingTimeMs ? { remainingTimeMs: request.remainingTimeMs } : {}),
     });
     return json(201, toPublicGame(game));
   }

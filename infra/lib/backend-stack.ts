@@ -14,6 +14,7 @@ import { Effect, PolicyStatement } from "aws-cdk-lib/aws-iam";
 import type { Construct } from "constructs";
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
+const defaultBedrockModelId = "global.anthropic.claude-sonnet-4-6";
 
 export interface FamilyLearningGamesBackendStackProps extends StackProps {
   aiGameGenerationEnabled?: boolean;
@@ -38,10 +39,13 @@ export class FamilyLearningGamesBackendStack extends Stack {
     const environment = this.node.tryGetContext("environment") ?? "dev";
     const aiGameGenerationEnabled = props?.aiGameGenerationEnabled
       ?? readBooleanContext(this.node.tryGetContext("aiGameGenerationEnabled"), "aiGameGenerationEnabled", false);
+    // ADR-015 (v0.7.1): Claude Sonnet 4.6 through its global cross-region
+    // inference profile for both roles. Still configuration: override per deploy
+    // with `-c bedrockGeneratorModelId=…` / `-c bedrockValidatorModelId=…`.
     const bedrockGeneratorModelId = props?.bedrockGeneratorModelId
-      ?? readStringContext(this.node.tryGetContext("bedrockGeneratorModelId"), "amazon.nova-lite-v1:0");
+      ?? readStringContext(this.node.tryGetContext("bedrockGeneratorModelId"), defaultBedrockModelId);
     const bedrockValidatorModelId = props?.bedrockValidatorModelId
-      ?? readStringContext(this.node.tryGetContext("bedrockValidatorModelId"), "amazon.nova-pro-v1:0");
+      ?? readStringContext(this.node.tryGetContext("bedrockValidatorModelId"), defaultBedrockModelId);
     const generationThrottleRateLimit = readPositiveNumber(
       props?.generationThrottleRateLimit ?? this.node.tryGetContext("generationThrottleRateLimit") ?? 1,
       "generationThrottleRateLimit",
@@ -151,13 +155,8 @@ export class FamilyLearningGamesBackendStack extends Stack {
       backend.addToRolePolicy(new PolicyStatement({
         effect: Effect.ALLOW,
         actions: ["bedrock:InvokeModel"],
-        resources: [bedrockGeneratorModelId, bedrockValidatorModelId].map((modelId) => this.formatArn({
-          service: "bedrock",
-          region: this.region,
-          account: "",
-          resource: "foundation-model",
-          resourceName: modelId,
-        })),
+        resources: [...new Set([bedrockGeneratorModelId, bedrockValidatorModelId]
+          .flatMap((modelId) => bedrockInvokeResources(this, modelId)))],
       }));
       backend.addToRolePolicy(new PolicyStatement({
         effect: Effect.ALLOW,
@@ -295,4 +294,32 @@ function createGuardrailPolicy() {
     contentPolicyConfig: { filtersConfig },
     sensitiveInformationPolicyConfig: { piiEntitiesConfig },
   };
+}
+
+// Cross-region inference profile IDs carry a geography prefix (e.g.
+// `us.anthropic...`, `global.anthropic...`). Invoking one requires permission on
+// the profile itself and on the underlying foundation model in every region the
+// profile may route to; global profiles route to the region-less model ARN.
+const inferenceProfilePrefixes = ["global", "us", "us-gov", "eu", "apac", "jp", "au", "ca"];
+
+export function bedrockInvokeResources(stack: Stack, modelId: string): string[] {
+  const prefix = modelId.split(".")[0];
+  if (!inferenceProfilePrefixes.includes(prefix) || !modelId.includes(".", prefix.length + 1)) {
+    return [stack.formatArn({
+      service: "bedrock",
+      region: stack.region,
+      account: "",
+      resource: "foundation-model",
+      resourceName: modelId,
+    })];
+  }
+  const foundationModelId = modelId.slice(prefix.length + 1);
+  const resources = [
+    stack.formatArn({ service: "bedrock", resource: "inference-profile", resourceName: modelId }),
+    stack.formatArn({ service: "bedrock", region: "*", account: "", resource: "foundation-model", resourceName: foundationModelId }),
+  ];
+  if (prefix === "global") {
+    resources.push(stack.formatArn({ service: "bedrock", region: "", account: "", resource: "foundation-model", resourceName: foundationModelId }));
+  }
+  return resources;
 }

@@ -99,8 +99,8 @@ test("provisions one guarded Bedrock integration with scoped IAM when enabled by
     Environment: {
       Variables: Match.objectLike({
         AI_GAME_GENERATION_ENABLED: "true",
-        BEDROCK_GENERATOR_MODEL_ID: "amazon.nova-lite-v1:0",
-        BEDROCK_VALIDATOR_MODEL_ID: "amazon.nova-pro-v1:0",
+        BEDROCK_GENERATOR_MODEL_ID: "global.anthropic.claude-sonnet-4-6",
+        BEDROCK_VALIDATOR_MODEL_ID: "global.anthropic.claude-sonnet-4-6",
         BEDROCK_REGION: "us-east-1",
         BEDROCK_GUARDRAIL_ID: Match.anyValue(),
         BEDROCK_GUARDRAIL_VERSION: Match.anyValue(),
@@ -157,9 +157,10 @@ test("provisions one guarded Bedrock integration with scoped IAM when enabled by
 
   const synthesized = JSON.stringify(template.toJSON());
   assert.match(synthesized, /bedrock:InvokeModel/);
-  assert.match(synthesized, /foundation-model\/amazon\.nova-lite-v1:0/);
-  assert.match(synthesized, /foundation-model\/amazon\.nova-pro-v1:0/);
-  assert.doesNotMatch(synthesized, /amazon\.nova-micro-v1:0/);
+  // v0.7.1 (ADR-015): the reproducible default is Claude Sonnet 4.6 for both roles.
+  assert.match(synthesized, /inference-profile\/global\.anthropic\.claude-sonnet-4-6/);
+  assert.match(synthesized, /foundation-model\/anthropic\.claude-sonnet-4-6/);
+  assert.doesNotMatch(synthesized, /amazon\.nova-/);
   assert.match(synthesized, /bedrock:ApplyGuardrail/);
   assert.match(synthesized, /dynamodb:PutItem/);
   assert.doesNotMatch(synthesized, /"Action":"bedrock:\*"/);
@@ -183,7 +184,7 @@ test("uses the deployment region for the Guardrail, Runtime client and model ARN
   defaultTemplate.hasResourceProperties("AWS::Lambda::Function", {
     Environment: { Variables: Match.objectLike({ BEDROCK_REGION: "us-east-1" }) },
   });
-  assert.match(JSON.stringify(defaultTemplate.toJSON()), /:bedrock:us-east-1::foundation-model/);
+  assert.match(JSON.stringify(defaultTemplate.toJSON()), /:bedrock:us-east-1:",\{"Ref":"AWS::AccountId"\},":inference-profile\//);
 
   const customStack = new FamilyLearningGamesBackendStack(
     new App({ context: { aiGameGenerationEnabled: true } }),
@@ -195,7 +196,68 @@ test("uses the deployment region for the Guardrail, Runtime client and model ARN
   customTemplate.hasResourceProperties("AWS::Lambda::Function", {
     Environment: { Variables: Match.objectLike({ BEDROCK_REGION: "eu-west-1" }) },
   });
-  assert.match(JSON.stringify(customTemplate.toJSON()), /:bedrock:eu-west-1::foundation-model/);
+  assert.match(JSON.stringify(customTemplate.toJSON()), /:bedrock:eu-west-1:",\{"Ref":"AWS::AccountId"\},":inference-profile\//);
+});
+
+test("model IDs remain external configuration: in-region foundation models can still be selected by context", () => {
+  const template = Template.fromStack(new FamilyLearningGamesBackendStack(
+    new App({
+      context: {
+        aiGameGenerationEnabled: true,
+        bedrockGeneratorModelId: "amazon.nova-lite-v1:0",
+        bedrockValidatorModelId: "amazon.nova-pro-v1:0",
+      },
+    }),
+    "FoundationModelOverrideStack",
+  ));
+  template.hasResourceProperties("AWS::Lambda::Function", {
+    Environment: {
+      Variables: Match.objectLike({
+        BEDROCK_GENERATOR_MODEL_ID: "amazon.nova-lite-v1:0",
+        BEDROCK_VALIDATOR_MODEL_ID: "amazon.nova-pro-v1:0",
+      }),
+    },
+  });
+  const statement = Object.values(template.findResources("AWS::IAM::Policy"))
+    .flatMap((resource) => resource.Properties.PolicyDocument.Statement as Array<Record<string, unknown>>)
+    .find((candidate) => candidate.Action === "bedrock:InvokeModel");
+  assert.ok(statement);
+  const resources = JSON.stringify(statement.Resource);
+  assert.match(resources, /:bedrock:us-east-1::foundation-model\/amazon\.nova-lite-v1:0/);
+  assert.match(resources, /:bedrock:us-east-1::foundation-model\/amazon\.nova-pro-v1:0/);
+  assert.doesNotMatch(resources, /inference-profile|claude/);
+  assert.equal((statement.Resource as unknown[]).length, 2);
+});
+
+test("grants inference-profile and routed foundation-model ARNs for cross-region model IDs", () => {
+  const template = Template.fromStack(new FamilyLearningGamesBackendStack(
+    new App({
+      context: {
+        aiGameGenerationEnabled: true,
+        bedrockGeneratorModelId: "global.anthropic.claude-sonnet-4-6",
+        bedrockValidatorModelId: "global.anthropic.claude-sonnet-4-6",
+      },
+    }),
+    "InferenceProfileStack",
+  ));
+  template.hasResourceProperties("AWS::Lambda::Function", {
+    Environment: {
+      Variables: Match.objectLike({
+        BEDROCK_GENERATOR_MODEL_ID: "global.anthropic.claude-sonnet-4-6",
+        BEDROCK_VALIDATOR_MODEL_ID: "global.anthropic.claude-sonnet-4-6",
+      }),
+    },
+  });
+  const statement = Object.values(template.findResources("AWS::IAM::Policy"))
+    .flatMap((resource) => resource.Properties.PolicyDocument.Statement as Array<Record<string, unknown>>)
+    .find((candidate) => candidate.Action === "bedrock:InvokeModel");
+  assert.ok(statement);
+  const resources = JSON.stringify(statement.Resource);
+  assert.match(resources, /:bedrock:us-east-1:",\{"Ref":"AWS::AccountId"\},":inference-profile\/global\.anthropic\.claude-sonnet-4-6/);
+  assert.match(resources, /:bedrock:\*::foundation-model\/anthropic\.claude-sonnet-4-6/);
+  assert.match(resources, /:bedrock:::foundation-model\/anthropic\.claude-sonnet-4-6/);
+  assert.doesNotMatch(resources, /foundation-model\/global\./);
+  assert.equal((statement.Resource as unknown[]).length, 3);
 });
 
 test("accepts configurable route throttling and rejects unsafe context values", () => {

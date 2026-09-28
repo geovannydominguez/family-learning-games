@@ -3,6 +3,8 @@ export interface HttpRequest {
   method: string;
   path: string;
   body?: string | null;
+  /** Remaining invocation time from the Lambda context; absent outside Lambda. */
+  remainingTimeMs?: () => number;
 }
 
 export interface HttpResponse {

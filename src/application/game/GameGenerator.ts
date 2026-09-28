@@ -40,6 +40,12 @@ export interface GenerateGameCommand {
   questionCount: number;
   playerId: string;
   correlationId?: string;
+  /**
+   * Remaining synchronous execution time in milliseconds (e.g. the Lambda
+   * context's `getRemainingTimeInMillis`). Optional: without it no
+   * execution-budget check is applied. Never crosses the AI boundary.
+   */
+  remainingTimeMs?: () => number;
 }
 
 export interface GeneratedGameDraft {

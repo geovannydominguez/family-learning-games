@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import type { Category, Difficulty, Game, Player, Question } from "../../domain/game/types.ts";
@@ -21,6 +22,8 @@ import {
 } from "./GameValidator.ts";
 import {
   GenerateGameService,
+  shuffleAnswers,
+  topicFingerprint,
   type GenerationFailureDiagnostic,
   type GenerationPipelineEvent,
 } from "./generateGameService.ts";
@@ -192,10 +195,11 @@ test("generates a normalized game with Application-owned identity", async () => 
   assert.equal(game.category.name, "Dinosaurs");
   // question / answer ids are reassigned by Application on final assembly
   assert.equal(game.questions[0].id, "q1");
-  assert.equal(game.questions[0].answers[0].id, "q1a1");
+  assert.deepEqual(game.questions[0].answers.map((answer) => answer.id), ["q1a1", "q1a2", "q1a3", "q1a4"]);
   assert.equal(game.questions.length, 10);
   assert.equal(game.questions[0].text, "Question 0");
-  assert.equal(game.questions[0].answers[0].text, "Answer 0");
+  // Answer order is shuffled (ADR-015); the correct answer keeps its own text.
+  assert.equal(game.questions[0].answers.find((answer) => answer.isCorrect)?.text, "Answer 0");
   // The legacy static roster is no longer sourced for AI-generated games (v0.6).
   assert.deepEqual(game.players, []);
   assert.deepEqual(game.generationMetadata, { targetAge: 4, difficulty: "easy" });
@@ -1767,4 +1771,468 @@ test("the original topic, difficulty, age and category identity are preserved ac
   }
   assert.equal(game.category.id, "pokemon");
   assert.ok(game.questions.every((question) => question.categoryId === "pokemon"));
+});
+
+// --- v0.7.1 (ADR-015): answer ordering, observability, execution budget ---
+
+/** Deterministic PRNG so shuffle assertions never depend on `Math.random`. */
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state * 1_664_525 + 1_013_904_223) >>> 0;
+    return state / 2 ** 32;
+  };
+}
+
+interface BudgetHarness {
+  service: GenerateGameService;
+  repository: StubGameRepository;
+  events: GenerationPipelineEvent[];
+  advance: (ms: number) => void;
+  remainingTimeMs: () => number;
+}
+
+/** A service whose clock is advanced by the fake generator/validator, like a real slow Bedrock call. */
+function budgetHarness(
+  build: (advance: (ms: number) => void) => { generator: GameGenerator; validator: GameValidator },
+  lambdaTimeoutMs = 28_000,
+): BudgetHarness {
+  let clock = 0;
+  const advance = (ms: number) => { clock += ms; };
+  const { generator, validator } = build(advance);
+  const events: GenerationPipelineEvent[] = [];
+  const repository = new StubGameRepository();
+  const service = new GenerateGameService(generator, validator, repository, new StubPlayerRepository(), {
+    enabled: true,
+    createId: () => "123e4567-e89b-12d3-a456-426614174000",
+    logEvent: (event) => events.push(event),
+    now: () => clock,
+  });
+  return {
+    service,
+    repository,
+    events,
+    advance,
+    remainingTimeMs: () => lambdaTimeoutMs - clock,
+  };
+}
+
+test("answer order: the generator's position of the correct answer does not reach the persisted game", async () => {
+  // Every generated question marks option 0 correct — the pattern observed with Claude.
+  const generator = generatorFrom(() => makeDraft());
+  const validator = validatorFrom(agreeingReview);
+  const repository = new StubGameRepository();
+  const service = new GenerateGameService(generator, validator, repository, new StubPlayerRepository(), {
+    enabled: true,
+    createId: () => "123e4567-e89b-12d3-a456-426614174000",
+    random: seededRandom(7),
+  });
+
+  const game = await service.generate(generateCommand);
+
+  const positions = game.questions.map((question) => question.answers.findIndex((answer) => answer.isCorrect));
+  assert.ok(positions.some((position) => position !== 0), `correct answer never moved: ${positions.join(",")}`);
+  for (const [index, question] of game.questions.entries()) {
+    // Correct-answer association preserved: exactly one correct, and it is still "Answer 0".
+    assert.equal(question.answers.filter((answer) => answer.isCorrect).length, 1);
+    assert.equal(question.answers.find((answer) => answer.isCorrect)?.text, "Answer 0");
+    assert.deepEqual(question.answers.map((answer) => answer.text).sort(), ["Answer 0", "Answer 1", "Answer 2", "Answer 3"]);
+    // Ids are reassigned AFTER the shuffle, so `qNa1` is not a proxy for "correct".
+    assert.deepEqual(question.answers.map((answer) => answer.id), [1, 2, 3, 4].map((n) => `q${index + 1}a${n}`));
+  }
+  assert.deepEqual(repository.created, [game]);
+});
+
+test("answer order: the shuffle happens after validation, so the deterministic comparison is unchanged", async () => {
+  const generator = generatorFrom(() => makeDraft());
+  const validator = validatorFrom(agreeingReview);
+  const service = new GenerateGameService(generator, validator, new StubGameRepository(), new StubPlayerRepository(), {
+    enabled: true,
+    random: seededRandom(11),
+  });
+
+  await service.generate(generateCommand);
+
+  // The validator saw the generator's own order and matched the generator's own index.
+  for (const question of validator.calls[0].draft.questions) {
+    assert.equal(question.answers.findIndex((answer) => answer.isCorrect), 0);
+  }
+});
+
+test("answer order: over many shuffles every position holds the correct answer", () => {
+  const question: Question = {
+    id: "q1",
+    categoryId: "c",
+    difficulty: "hard",
+    text: "t",
+    answers: ["right", "w1", "w2", "w3"].map((text, index) => ({ id: `a${index}`, text, isCorrect: index === 0 })),
+  };
+  const random = seededRandom(3);
+  const counts = [0, 0, 0, 0];
+  for (let run = 0; run < 400; run += 1) {
+    const shuffled = shuffleAnswers(question, random);
+    const position = shuffled.answers.findIndex((answer) => answer.isCorrect);
+    counts[position] += 1;
+    assert.equal(shuffled.answers[position].text, "right");
+    assert.equal(shuffled.answers[position].id, "a0");
+  }
+  assert.ok(counts.every((count) => count > 40), `unbalanced positions: ${counts.join(",")}`);
+  // The input question is never mutated.
+  assert.equal(question.answers[0].text, "right");
+  // A degenerate random source (1.0) cannot produce an out-of-range swap.
+  assert.equal(shuffleAnswers(question, () => 1).answers.length, 4);
+});
+
+test("observability: every pipeline event carries difficulty, targetAge and topicHash, never the topic or player identity", async () => {
+  const generator = generatorFrom((_request, call) => (call === 1 ? makeDraft() : draftWithQuestionTexts(["fresh"])));
+  const validator = validatorFrom(reviewRejecting(["Question 0"]));
+  const { service, events } = serviceWith(generator, validator);
+
+  await service.generate({ ...generateCommand, correlationId: "req-123" });
+
+  const expectedHash = createHash("sha256").update("pokémon".normalize("NFC")).digest("hex");
+  assert.ok(events.length > 0);
+  for (const event of events) {
+    assert.equal(event.correlationId, "req-123");
+    assert.equal(event.difficulty, "easy");
+    assert.equal(event.targetAge, 4);
+    assert.equal(event.topicHash, expectedHash);
+    assert.equal(event.generatorModel, "amazon.nova-lite-v1:0");
+    assert.equal(event.validatorModel, "amazon.nova-pro-v1:0");
+  }
+  const serialized = JSON.stringify(events);
+  for (const forbidden of ["Pokémon", "pokémon", "Pokemon", "amelia", "Amelia", "playerId", "Question 1", "Answer 0"]) {
+    assert.equal(serialized.includes(forbidden), false, `event log leaked ${forbidden}`);
+  }
+});
+
+test("observability: repair rounds report generated/accepted/rejected counts and per-call durations", async () => {
+  const generator = generatorFrom((_request, call) => (call === 1 ? makeDraft() : draftWithQuestionTexts(["fresh"])));
+  const validator = validatorFrom(reviewRejecting(["Question 0"]));
+  const harness = budgetHarness((advance) => ({
+    generator: {
+      async generate(request) { advance(request.questionCount === 10 ? 14_000 : 3_000); return generator.generate(request); },
+    },
+    validator: { async validate(request) { advance(4_000); return validator.validate(request); } },
+  }));
+
+  await harness.service.generate(generateCommand);
+
+  const rounds = harness.events.filter((event) => event.event === "AI_GAME_REPAIR_ROUND");
+  assert.deepEqual(rounds.map((event) => event.generatorDurationMs), [14_000, 3_000]);
+  assert.deepEqual(rounds.map((event) => event.validatorDurationMs), [4_000, 4_000]);
+  assert.deepEqual(rounds.map((event) => event.generatedCount), [10, 1]);
+  assert.deepEqual(rounds.map((event) => event.acceptedCount), [9, 1]);
+  assert.deepEqual(rounds.map((event) => event.rejectedQuestionCount), [1, 0]);
+  assert.deepEqual(rounds.map((event) => event.acceptedQuestionCount), [9, 10]);
+});
+
+test("observability: a semantic rejection logs a bounded, single-line validator reason server-side only", async () => {
+  const longReason = `Not about the requested topic.\n${"x".repeat(500)}`;
+  const generator = generatorFrom((_request, call) => (call === 1 ? makeDraft() : draftWithQuestionTexts(["fresh"])));
+  const validator = validatorFrom((request, call) => {
+    if (call > 1) return agreeingReview(request);
+    return reviewFirstQuestionAs({
+      answerIndex: 0,
+      issues: [
+        { questionIndex: 0, type: "OFF_TOPIC", reason: longReason },
+        { questionIndex: 0, type: "WEAK_DISTRACTOR", reason: "warning reasons are not copied" },
+      ],
+    })(request);
+  });
+  const { service, events } = serviceWith(generator, validator);
+
+  const game = await service.generate(generateCommand);
+
+  const rejected = events.find((event) => event.event === "AI_GAME_VALIDATION_REJECTED");
+  assert.ok(rejected);
+  assert.deepEqual(rejected.issueTypes, ["OFF_TOPIC"]);
+  assert.equal(rejected.generatorAnswerIndex, 0);
+  assert.equal(rejected.validatorAnswerIndex, 0);
+  assert.equal(rejected.confident, true);
+  assert.equal(rejected.ambiguous, false);
+  assert.ok(rejected.reason?.startsWith("Not about the requested topic. xxx"));
+  assert.ok((rejected.reason?.length ?? 0) <= 200);
+  assert.equal(rejected.reason?.includes("\n"), false);
+  assert.equal(rejected.reason?.includes("warning reasons"), false);
+  // The reason never reaches the generator (repair hygiene) nor the persisted/returned game.
+  assert.equal(JSON.stringify(generator.calls).includes("Not about"), false);
+  assert.equal(JSON.stringify(game).includes("Not about"), false);
+});
+
+test("OFF_TOPIC keeps blocking: the question is rejected and replaced, never accepted", async () => {
+  const generator = generatorFrom((_request, call) => (call === 1 ? makeDraft() : draftWithQuestionTexts(["fresh"])));
+  const validator = validatorFrom((request, call) => (call > 1
+    ? agreeingReview(request)
+    : reviewFirstQuestionAs({ answerIndex: 0, issues: [{ questionIndex: 0, type: "OFF_TOPIC", reason: "off" }] })(request)));
+  const { service } = serviceWith(generator, validator);
+
+  const game = await service.generate(generateCommand);
+
+  assert.equal(game.questions.some((question) => question.text === "Question 0"), false);
+  assert.ok(game.questions.some((question) => question.text === "fresh"));
+});
+
+test("topicHash is a SHA-256 of the normalized topic and is stable across trivial variants", () => {
+  const hash = topicFingerprint("Mundiales de Fútbol");
+  assert.match(hash, /^[a-f0-9]{64}$/);
+  assert.equal(topicFingerprint("  mundiales   de FÚTBOL "), hash);
+  assert.equal(topicFingerprint("Mundiales de Fu\u0301tbol"), hash); // NFD input
+  assert.notEqual(topicFingerprint("Pokémon"), hash);
+  assert.equal(hash.includes("mundiales"), false);
+});
+
+/**
+ * Round 1 takes `round1` (generator, validator) ms and rejects `rejected`
+ * questions; repair rounds take `repair` ms and return the requested batch.
+ * The fake clock is what the budget reads through `remainingTimeMs`.
+ */
+function repairScenario(options: {
+  rejected: number;
+  round1: [number, number];
+  repair?: [number, number];
+  lambdaTimeoutMs?: number;
+}) {
+  const rejectTexts = Array.from({ length: options.rejected }, (_, index) => `Question ${index}`);
+  const generator = generatorFrom((request, call) => (call === 1
+    ? makeDraft()
+    : draftWithQuestionTexts(Array.from({ length: request.questionCount }, (_, index) => `fresh ${call}-${index}`))));
+  const validator = validatorFrom(reviewRejecting(rejectTexts));
+  const [repairGeneratorMs, repairValidatorMs] = options.repair ?? [4_083, 2_967];
+  const harness = budgetHarness((advance) => ({
+    generator: {
+      async generate(request) {
+        advance(generator.calls.length === 0 ? options.round1[0] : repairGeneratorMs);
+        return generator.generate(request);
+      },
+    },
+    validator: {
+      async validate(request) {
+        advance(validator.calls.length === 0 ? options.round1[1] : repairValidatorMs);
+        return validator.validate(request);
+      },
+    },
+  }), options.lambdaTimeoutMs);
+  return { generator, validator, harness };
+}
+
+function budgetExhausted(events: GenerationPipelineEvent[]): GenerationPipelineEvent | undefined {
+  return events.find((event) => event.event === "AI_GAME_EXECUTION_BUDGET_EXHAUSTED");
+}
+
+const isContentInvalid = (error: unknown) => error instanceof ApplicationError && error.code === "AI_GENERATED_CONTENT_INVALID";
+const isGenerationFailed = (error: unknown) => error instanceof ApplicationError && error.code === "AI_GENERATION_FAILED";
+
+test("execution budget 9/10: a 1-question repair runs even after the slowest observed round 1", async () => {
+  // Slowest live round 1 (13 315 + 6 034 ms) leaves 8 651 ms ≥ 4 200 + 3 450 + 1 000.
+  const { generator, validator, harness } = repairScenario({ rejected: 1, round1: [13_315, 6_034] });
+
+  const game = await harness.service.generate({ ...generateCommand, remainingTimeMs: harness.remainingTimeMs });
+
+  assert.equal(generator.calls.length, 2);
+  assert.equal(generator.calls[1].questionCount, 1);
+  assert.equal(validator.calls.length, 2);
+  assert.equal(game.questions.length, 10);
+  assert.equal(harness.repository.created.length, 1);
+  assert.equal(budgetExhausted(harness.events), undefined);
+});
+
+test("execution budget 9/10: the 1-question repair is refused when the remaining time cannot fit it", async () => {
+  const { generator, harness } = repairScenario({ rejected: 1, round1: [13_315, 6_100] });
+
+  await assert.rejects(
+    harness.service.generate({ ...generateCommand, remainingTimeMs: harness.remainingTimeMs }),
+    isContentInvalid,
+  );
+
+  assert.equal(generator.calls.length, 1);
+  assert.equal(harness.repository.created.length, 0);
+  const exhausted = budgetExhausted(harness.events);
+  assert.equal(exhausted?.budgetedOperation, "repair");
+  assert.equal(exhausted?.batchSize, 1);
+  assert.equal(exhausted?.round, 2);
+  assert.equal(exhausted?.remainingTimeMs, 8_585);
+  assert.equal(exhausted?.requiredTimeMs, 8_650);
+  assert.equal(exhausted?.acceptedQuestionCount, 9);
+});
+
+test("execution budget 8/10: the repair is costed as batchSize=2 and refused when it does not fit", async () => {
+  const { generator, harness } = repairScenario({ rejected: 2, round1: [13_000, 5_000] });
+
+  await assert.rejects(
+    harness.service.generate({ ...generateCommand, remainingTimeMs: harness.remainingTimeMs }),
+    isContentInvalid,
+  );
+
+  assert.equal(generator.calls.length, 1);
+  const exhausted = budgetExhausted(harness.events);
+  assert.equal(exhausted?.batchSize, 2);
+  assert.equal(exhausted?.remainingTimeMs, 10_000);
+  assert.equal(exhausted?.requiredTimeMs, 10_300);
+});
+
+test("execution budget 8/10: the same 2-question repair runs when round 1 was fast enough", async () => {
+  const { generator, harness } = repairScenario({ rejected: 2, round1: [10_000, 4_000], repair: [5_215, 2_242] });
+
+  const game = await harness.service.generate({ ...generateCommand, remainingTimeMs: harness.remainingTimeMs });
+
+  assert.equal(generator.calls[1].questionCount, 2);
+  assert.equal(game.questions.length, 10);
+  assert.equal(budgetExhausted(harness.events), undefined);
+});
+
+test("execution budget 7/10: the repair is costed as batchSize=3", async () => {
+  const { harness } = repairScenario({ rejected: 3, round1: [13_000, 5_000] });
+
+  await assert.rejects(
+    harness.service.generate({ ...generateCommand, remainingTimeMs: harness.remainingTimeMs }),
+    isContentInvalid,
+  );
+
+  const exhausted = budgetExhausted(harness.events);
+  assert.equal(exhausted?.batchSize, 3);
+  assert.equal(exhausted?.requiredTimeMs, 11_950);
+});
+
+test("execution budget: no hard-coded 'repair 1 only' — a 5-question repair runs when time allows", async () => {
+  const { generator, harness } = repairScenario({ rejected: 5, round1: [6_000, 2_000], repair: [8_704, 5_219] });
+
+  const game = await harness.service.generate({ ...generateCommand, remainingTimeMs: harness.remainingTimeMs });
+
+  assert.equal(generator.calls[1].questionCount, 5);
+  assert.equal(game.questions.length, 10);
+  assert.equal(budgetExhausted(harness.events), undefined);
+});
+
+test("execution budget: a slower-than-baseline round 1 raises the estimate and can refuse a repair", async () => {
+  // Generator 18 000 ms for 10 questions → factor 1.2. Remaining 9 000 ms would fit
+  // the baseline 8 650 ms, but not the adjusted 4 200 × 1.2 + 3 450 + 1 000 = 9 490 ms.
+  const { harness } = repairScenario({ rejected: 1, round1: [18_000, 1_000] });
+
+  await assert.rejects(
+    harness.service.generate({ ...generateCommand, remainingTimeMs: harness.remainingTimeMs }),
+    isContentInvalid,
+  );
+
+  const exhausted = budgetExhausted(harness.events);
+  assert.equal(exhausted?.remainingTimeMs, 9_000);
+  assert.equal(exhausted?.requiredTimeMs, 9_490);
+});
+
+test("execution budget: validation is not started when its batch cannot fit", async () => {
+  const generator = generatorFrom(() => makeDraft());
+  const validator = validatorFrom(agreeingReview);
+  const harness = budgetHarness((advance) => ({
+    generator: { async generate(request) { advance(22_000); return generator.generate(request); } },
+    validator,
+  }));
+
+  await assert.rejects(
+    harness.service.generate({ ...generateCommand, remainingTimeMs: harness.remainingTimeMs }),
+    isContentInvalid,
+  );
+
+  assert.equal(validator.calls.length, 0);
+  assert.equal(harness.repository.created.length, 0);
+  const exhausted = budgetExhausted(harness.events);
+  assert.equal(exhausted?.budgetedOperation, "validate");
+  assert.equal(exhausted?.batchSize, 10);
+  assert.equal(exhausted?.requiredTimeMs, 8_500);
+});
+
+test("execution budget: a provider_error technical retry runs when the budget allows it", async () => {
+  let calls = 0;
+  const harness = budgetHarness((advance) => ({
+    generator: {
+      async generate() {
+        calls += 1;
+        advance(calls === 1 ? 500 : 13_000);
+        if (calls === 1) throw new Error("ThrottlingException");
+        return makeDraft();
+      },
+    },
+    validator: validatorFrom(agreeingReview),
+  }));
+
+  const game = await harness.service.generate({ ...generateCommand, remainingTimeMs: harness.remainingTimeMs });
+
+  assert.equal(calls, 2);
+  assert.equal(game.questions.length, 10);
+  assert.equal(budgetExhausted(harness.events), undefined);
+});
+
+test("F2: a provider_error whose retry cannot be afforded keeps the 502 AI_GENERATION_FAILED semantics", async () => {
+  let calls = 0;
+  const harness = budgetHarness((advance) => ({
+    generator: {
+      async generate() {
+        calls += 1;
+        advance(5_000); // 23 000 ms left < 15 000 + 7 500 + 1 000
+        throw new Error("InternalServerException");
+      },
+    },
+    validator: validatorFrom(agreeingReview),
+  }));
+
+  await assert.rejects(
+    harness.service.generate({ ...generateCommand, remainingTimeMs: harness.remainingTimeMs }),
+    isGenerationFailed,
+  );
+  assert.equal(calls, 1);
+  assert.equal(harness.repository.created.length, 0);
+  const exhausted = budgetExhausted(harness.events);
+  assert.equal(exhausted?.budgetedOperation, "technical_retry");
+  assert.equal(exhausted?.batchSize, 10);
+});
+
+test("F2: malformed content whose retry cannot be afforded still maps to 422, not 502", async () => {
+  let calls = 0;
+  const harness = budgetHarness((advance) => ({
+    generator: {
+      async generate() {
+        calls += 1;
+        advance(5_000);
+        throw new InvalidGeneratedGameCandidateError({ failureType: "invalid_json" });
+      },
+    },
+    validator: validatorFrom(agreeingReview),
+  }));
+
+  await assert.rejects(
+    harness.service.generate({ ...generateCommand, remainingTimeMs: harness.remainingTimeMs }),
+    isContentInvalid,
+  );
+  assert.equal(calls, 1);
+  assert.equal(budgetExhausted(harness.events)?.budgetedOperation, "technical_retry");
+});
+
+test("execution budget: exhaustion telemetry carries no topic or player identity", async () => {
+  const { harness } = repairScenario({ rejected: 1, round1: [13_315, 6_100] });
+
+  await assert.rejects(harness.service.generate({ ...generateCommand, remainingTimeMs: harness.remainingTimeMs }));
+
+  const serialized = JSON.stringify(budgetExhausted(harness.events));
+  for (const forbidden of ["Pokémon", "amelia", "Amelia", "playerId", "Question 0"]) {
+    assert.equal(serialized.includes(forbidden), false, `budget event leaked ${forbidden}`);
+  }
+});
+
+test("execution budget: without a remaining-time source the existing repair behaviour is unchanged", async () => {
+  const { generator, harness } = repairScenario({ rejected: 1, round1: [25_000, 25_000], repair: [25_000, 25_000] });
+
+  const game = await harness.service.generate(generateCommand);
+
+  assert.equal(game.questions.length, 10);
+  assert.equal(generator.calls.length, 2);
+});
+
+test("remainingTimeMs never crosses the AI boundary", async () => {
+  const generator = generatorFrom(() => makeDraft());
+  const validator = validatorFrom(agreeingReview);
+  const { service } = serviceWith(generator, validator);
+
+  await service.generate({ ...generateCommand, remainingTimeMs: () => 60_000 });
+
+  assert.deepEqual(Object.keys(generator.calls[0]).sort(), ["difficulty", "questionCount", "targetAge", "topic"]);
+  assert.deepEqual(Object.keys(validator.calls[0]).sort(), ["difficulty", "draft", "targetAge", "topic"]);
 });

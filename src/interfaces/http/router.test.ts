@@ -204,6 +204,39 @@ test("POST /games/generate returns the existing public game shape without answer
   assert.deepEqual(commands, [{ topic: "animals", difficulty: "easy", questionCount: 10, playerId: "amelia", correlationId: "generate-1" }]);
 });
 
+test("POST /games/generate forwards the Lambda remaining-time source without changing the public contract", async () => {
+  const games = new MockGameRepository();
+  const generated = await games.findById("animals");
+  assert.ok(generated);
+  const commands: Array<Record<string, unknown>> = [];
+  const generationService = { generate: async (command: Record<string, unknown>) => {
+    commands.push(command);
+    return { ...generated, id: "ai-animals-2" };
+  } } as unknown as GenerateGameService;
+  const players = playersRepositoryWith();
+  const router = createHttpRouter({
+    games,
+    sessionService: new GameSessionService(games, new InMemoryGameSessionRepository(), players),
+    playerService: new PlayerService(players),
+    generationService,
+    log: () => {},
+  });
+  const remainingTimeMs = () => 27_500;
+
+  const response = await router({
+    requestId: "generate-2",
+    method: "POST",
+    path: "/games/generate",
+    body: JSON.stringify({ topic: "animals", difficulty: "hard", questionCount: 10, playerId: "amelia" }),
+    remainingTimeMs,
+  });
+
+  assert.equal(response.statusCode, 201);
+  assert.equal(response.body.includes("isCorrect"), false);
+  assert.equal(commands[0].remainingTimeMs, remainingTimeMs);
+  assert.equal(commands[0].correlationId, "generate-2");
+});
+
 test("POST /games/generate maps generation errors to safe status contracts", async () => {
   const scenarios: Array<{ error: Error; status: number; code: string }> = [
     { error: new ApplicationError("INVALID_GENERATION_REQUEST", "Generation request is invalid."), status: 400, code: "INVALID_GENERATION_REQUEST" },

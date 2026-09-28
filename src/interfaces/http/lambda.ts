@@ -92,10 +92,12 @@ function requireConfiguration(name: string, environment: Record<string, string |
 
 let router: ReturnType<typeof createRuntimeRouter> | undefined;
 
-export const handler: APIGatewayProxyHandlerV2 = async (event) =>
+export const handler: APIGatewayProxyHandlerV2 = async (event, context) =>
   (router ??= createRuntimeRouter())({
     requestId: event.requestContext.requestId,
     method: event.requestContext.http.method,
     path: event.rawPath,
     body: event.body,
+    // ADR-015: lets AI generation avoid starting a call it cannot finish.
+    remainingTimeMs: () => context.getRemainingTimeInMillis(),
   });

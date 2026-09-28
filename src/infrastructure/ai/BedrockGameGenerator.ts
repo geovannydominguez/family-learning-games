@@ -1,5 +1,6 @@
 import { ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 
+import type { Difficulty } from "../../domain/game/types.ts";
 import {
   InvalidGeneratedGameCandidateError,
   type GeneratedGameDraft,
@@ -31,13 +32,13 @@ function buildSystemPrompt(count: number): string {
   const many = count >= 4;
   const questionsPhrase = count === 1 ? "1 question" : `${count} questions`;
   const diversityRule = many
-    ? `The ${count} questions must be meaningfully diverse. Use at least 4 different question or reasoning types within the set. Do not use the same question template or pattern more than twice. Do not create near-duplicate questions by only changing the numbers, names, or nouns. Each question should feel distinct from the others even though they share one topic.`
-    : `Each of the ${questionsPhrase} must feel distinct. Do not reuse the same question template, and do not create near-duplicate questions by only changing the numbers, names, or nouns.`;
+    ? `The ${count} questions must be meaningfully diverse. Use at least 4 different question or reasoning types within the set. Do not use the same question template or pattern more than twice. Do not create near-duplicate questions by only changing the numbers, names, or nouns. Each question should feel distinct from the others even though they share one topic. Do not ask two questions that test the same fact or idea with different wording, and do not let one question give away the answer to another.`
+    : `Each of the ${questionsPhrase} must feel distinct. Do not reuse the same question template, and do not create near-duplicate questions by only changing the numbers, names, or nouns. Do not test the same fact or idea as another question with different wording.`;
   const uniquenessCheck = count === 1
     ? `Before returning the JSON, internally verify that the question has 4 distinct answer texts and exactly one correct answer; if a check fails, revise until it passes.`
     : `Before returning the JSON, internally verify that there are ${count} unique question texts, that every question has 4 distinct answer texts, and that every question has exactly one correct answer; if any check fails, revise the content until it passes.`;
 
-  return `You generate simple, family-friendly educational quiz games for children.
+  return `You generate family-friendly educational multiple-choice quiz games.
 Write all player-facing content in Latin American Spanish.
 Return exactly ${questionsPhrase} with exactly 4 answers per question and exactly one correct answer.
 Every question must be factual, non-ambiguous, non-subjective, age-appropriate, and educational.
@@ -56,7 +57,8 @@ answer.isCorrect must be a JSON boolean, and exactly one answer per question has
 ${diversityRule}
 This diversity must stay appropriate for the target player age and consistent with the requested difficulty; hard stays relative to the target age. For ages 4 through 6, do not introduce more advanced concepts only to add variety, and keep every age restriction that follows below.
 For numeric or math topics, draw variety as guidance and not as a rigid schema from: counting, comparison, addition or subtraction, patterns and sequences, simple everyday word problems, estimation or selection, numeric relationships, and age-appropriate numeric logic.
-For animals, vary across identification, habitat, feeding, characteristics, simple classification, and behavior. For space, vary across planets, objects, positions, characteristics, and exploration. For any other topic, spread the questions across different subtopics or ways of reasoning.
+For animals, vary across identification, habitat, feeding, characteristics, simple classification, and behavior. For space, vary across planets, objects, positions, characteristics, and exploration. For any other topic, spread the questions across the different dimensions the topic supports, such as people or characters, events, chronology, places, rules, records, relationships, concepts, and notable facts, instead of asking variations of one idea.
+Distractor rules: exactly one option is correct, and every incorrect option must be clearly wrong for someone who knows the fact; never make a distractor partly correct or add ambiguity to make a question harder. All four options must be the same kind of answer as the correct one (same type of entity, same category, and the same sport, franchise, era, or unit when relevant) with a similar form and length, so the correct answer is never revealed by being the only option that fits the question.
 ${count === 1 ? "Every question text must be unique." : `Every question text must be unique across the ${count} questions.`} Within one question, no two answer texts may be identical. Prefer every answer text to be unique across the whole game when practical. Do not reuse the same sentence with only minor wording changes.
 ${uniquenessCheck}
 The following is a structure example only; actual output must still contain exactly ${questionsPhrase}:
@@ -117,7 +119,9 @@ export class BedrockGameGenerator implements GameGenerator {
 
       response = await this.client.send(new ConverseCommand({
         modelId: this.config.modelId,
-        system: [{ text: `${buildSystemPrompt(request.questionCount)}\n${ageAwarePrompt(request.targetAge)}` }],
+        system: [{
+          text: `${buildSystemPrompt(request.questionCount)}\n${ageAwarePrompt(request.targetAge)}\n${difficultyPrompt(request.difficulty)}`,
+        }],
         messages: [{ role: "user", content: buildGuardedUserContent(request.topic, trustedInstructions) }],
         inferenceConfig: { temperature: 0, maxTokens: 4096 },
         guardrailConfig: {
@@ -186,6 +190,32 @@ function ageAwarePrompt(targetAge: number): string {
     return `${ageInstruction}\nFor ages 4 through 6, use small, concrete, developmentally appropriate concepts. Do not use powers or exponents, square roots, algebra, advanced fractions, advanced multiplication or division, or obviously age-inappropriate concepts.`;
   }
   return ageInstruction;
+}
+
+/**
+ * ADR-015 difficulty semantics. Difficulty sets the level of challenge; the
+ * target age (see `ageAwarePrompt`) sets the boundaries that challenge must stay
+ * inside. The two are independent: every level is written for the same age.
+ */
+const difficultyGuidance: Record<Difficulty, string> = {
+  easy: `Requested difficulty: EASY.
+- Ask about basic, widely recognizable facts of the topic, answerable by direct recall.
+- Keep concepts simple, with at most one small reasoning step.
+- Distractors must be clearly distinguishable from the correct answer while still being the same kind of answer.`,
+  normal: `Requested difficulty: NORMAL.
+- Ask about more specific topic knowledge that needs real familiarity with the topic; recall must be less obvious than an easy question.
+- Distractors must be plausible alternatives from the same conceptual space as the correct answer (for example other characters of the same franchise, other editions of the same competition, other players of the same sport, or other values of the same kind).
+- The correct answer must not be discoverable merely because the other options are unrelated, absurd, or of a different kind.`,
+  hard: `Requested difficulty: HARD.
+- Ask about detailed or less obvious topic knowledge: specific events, facts, records, chronology, characters, editions, relationships, or comparable topic-specific detail.
+- Do not fill the game with basic introductory questions that would naturally qualify as easy, even when the topic itself sounds advanced.
+- Distractors must be strong and plausible: same conceptual space, same kind of answer, and close enough that only someone who knows the detail picks the correct one.
+- Hard means deeper knowledge of the topic, not adult, university-level, trick, obscure-for-its-own-sake, or intentionally ambiguous content.`,
+};
+
+function difficultyPrompt(difficulty: Difficulty): string {
+  return `${difficultyGuidance[difficulty]}
+Difficulty and target age are independent. The target age sets the boundaries: vocabulary, sentence complexity, age-appropriate knowledge, and suitable content. The difficulty sets how challenging the questions are inside those boundaries. Every difficulty level must stay fully appropriate for the target age; a harder game for a young player asks about less obvious facts of the topic, not about adult or advanced material.`;
 }
 
 function parseResponse(

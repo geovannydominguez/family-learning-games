@@ -48,7 +48,8 @@ Tests use injected clients and do not call live AWS services. `npm run build` pr
 | `allowedOrigins` | (unset) | Comma-separated list of exact CORS origins (e.g. `http://localhost:3000,https://main.d123.amplifyapp.com`). Takes precedence over `frontendOrigin`. |
 | `frontendOrigin` | `http://localhost:3000` | Single exact CORS origin; backward-compatible fallback used only when `allowedOrigins` is not set. |
 | `aiGameGenerationEnabled` | `false` | Opts the deployment into Bedrock generation. |
-| `bedrockModelId` | `amazon.nova-micro-v1:0` | Converse model used only when AI is enabled. |
+| `bedrockGeneratorModelId` | `global.anthropic.claude-sonnet-4-6` | Generator model (ADR-015), used only when AI is enabled. |
+| `bedrockValidatorModelId` | `global.anthropic.claude-sonnet-4-6` | Independent validator model (ADR-011/ADR-015), used only when AI is enabled. |
 | `deploymentRegion` | `us-east-1` | Region for the complete stack, including Bedrock Runtime, its model ARN, and the Guardrail. |
 | `generationThrottleRateLimit` | `1` | Rate limit for `POST /games/generate`, in requests/second. |
 | `generationThrottleBurstLimit` | `2` | Burst limit for `POST /games/generate`. |
@@ -56,7 +57,7 @@ Tests use injected clients and do not call live AWS services. `npm run build` pr
 Boolean context values accept only `true` or `false`. Throttle values must be positive, and the burst limit must be an integer. Each origin must be an `http://` or `https://` URL with no trailing slash; the stack never accepts `*` as an origin.
 Choose one `<region>` for the deployment and repeat `-c deploymentRegion=<region>` on every CDK lifecycle command. Omitting it targets the default `us-east-1`, regardless of the AWS profile's configured region.
 
-When AI is enabled, CDK provisions one family-safe Bedrock Guardrail and one published version. Lambda receives `BEDROCK_MODEL_ID`, `BEDROCK_REGION`, `BEDROCK_GUARDRAIL_ID`, and `BEDROCK_GUARDRAIL_VERSION`, uses a 28-second timeout, and receives resource-scoped `bedrock:InvokeModel`, `bedrock:ApplyGuardrail`, and Games-table `dynamodb:PutItem` permissions. `BEDROCK_REGION` is always the stack deployment region, so the Guardrail, Runtime client, and model ARN cannot be configured cross-region. Disabled deployments keep the 10-second timeout, cannot write to the Games table, and provision no Bedrock resources or permissions.
+When AI is enabled, CDK provisions one family-safe Bedrock Guardrail and one published version. Lambda receives `BEDROCK_GENERATOR_MODEL_ID`, `BEDROCK_VALIDATOR_MODEL_ID`, `BEDROCK_REGION`, `BEDROCK_GUARDRAIL_ID`, and `BEDROCK_GUARDRAIL_VERSION`, uses a 28-second timeout, and receives resource-scoped `bedrock:InvokeModel`, `bedrock:ApplyGuardrail`, and Games-table `dynamodb:PutItem` permissions. `BEDROCK_REGION` is always the stack deployment region, so the Guardrail, Runtime client, and model ARN cannot be configured cross-region. Model IDs are set with `-c bedrockGeneratorModelId=...` / `-c bedrockValidatorModelId=...`; a cross-region inference profile ID (for example `global.anthropic.claude-sonnet-4-6`) is granted on its `inference-profile` ARN plus the underlying `foundation-model` ARNs it routes to. Change models through CDK context, not by editing the Lambda environment in the console: the IAM policy is derived from these IDs and the next deploy would overwrite manual edits. Disabled deployments keep the 10-second timeout, cannot write to the Games table, and provision no Bedrock resources or permissions.
 
 Generated candidates enforce these additional metadata limits before persistence: category ID 80 characters, category name 100, category description 300, category icon 16, question ID 80, answer ID 80, emoji 16, and image reference 2048. Every supplied field is trimmed and must remain non-empty; the existing title/question/answer limits remain 100/240/120.
 
@@ -81,7 +82,8 @@ npx cdk deploy FamilyLearningGamesBackendStack --profile <aws-profile> \
 npx cdk diff FamilyLearningGamesBackendStack \
   --profile <aws-profile> \
   -c aiGameGenerationEnabled=true \
-  -c bedrockModelId=amazon.nova-micro-v1:0 \
+  -c bedrockGeneratorModelId=global.anthropic.claude-sonnet-4-6 \
+  -c bedrockValidatorModelId=global.anthropic.claude-sonnet-4-6 \
   -c deploymentRegion=<region> \
   -c generationThrottleRateLimit=1 \
   -c generationThrottleBurstLimit=2
@@ -89,7 +91,8 @@ npx cdk diff FamilyLearningGamesBackendStack \
 npx cdk deploy FamilyLearningGamesBackendStack \
   --profile <aws-profile> \
   -c aiGameGenerationEnabled=true \
-  -c bedrockModelId=amazon.nova-micro-v1:0 \
+  -c bedrockGeneratorModelId=global.anthropic.claude-sonnet-4-6 \
+  -c bedrockValidatorModelId=global.anthropic.claude-sonnet-4-6 \
   -c deploymentRegion=<region> \
   -c generationThrottleRateLimit=1 \
   -c generationThrottleBurstLimit=2
@@ -171,6 +174,21 @@ Re-run step 4 (adding the new origin to the existing `allowedOrigins` list) when
 ### Cost awareness
 
 Amplify Hosting bills per build minute and per GB served — both usage-based, no always-on server. It is billed independently from, and in addition to, the existing API Gateway/Lambda/DynamoDB/Bedrock usage-based charges. Review Amplify build minutes and data transfer alongside the existing Bedrock/Lambda cost checks below once the app is public.
+
+## AI generation quality and runtime behavior (v0.7.1)
+
+See `docs/architecture/ADR-015-claude-sonnet-ai-generation-quality.md`. Generator and validator remain two independent, stateless Converse calls followed by the deterministic Application comparison (ADR-011); the guarded-topic mechanism and the Guardrail are unchanged.
+
+- **Difficulty.** The generator prompt defines explicit `easy` / `normal` / `hard` semantics, plus intra-game diversity and same-kind, plausible distractor rules. `targetAge` still sets the age boundaries; `difficulty` sets the challenge inside them.
+- **Answer order.** Application shuffles each accepted question's answers after validation and before assigning answer ids, so neither position nor id reveals the correct answer. The model is never asked to randomize.
+- **Execution budget.** The Lambda handler passes `context.getRemainingTimeInMillis()` to Application. Each AI call is costed by its batch size `n`: generator `3000 + 1200·n` ms, validator `3000 + 450·n` ms, plus a 1 s margin (a generation must fit generator + validator + margin; a validation, validator + margin). A call slower than its estimate raises that role's factor (never below 1) for the rest of the request. So a 9/10 round costs its repair as 1 question and can still run; larger repairs run only if the remaining time allows. When a call does not fit, the request ends with the existing `422 AI_GENERATED_CONTENT_INVALID` (or `502 AI_GENERATION_FAILED` if the unaffordable call is a provider-error retry) and logs `AI_GAME_EXECUTION_BUDGET_EXHAUSTED`, instead of being killed by the 28 s timeout. `maxRepairRounds = 5` is an upper bound, not a guarantee. The constants come from a controlled 30-call measurement (see ADR-015), not a Bedrock SLA. Policy: `src/application/game/executionBudget.ts`.
+- **Observability.** Every `AI_GAME_*` event carries `correlationId` (the API Gateway request id), `difficulty`, `targetAge`, `topicHash` (SHA-256 of the trimmed, NFC, lower-cased, whitespace-collapsed topic), and the model ids. `AI_GAME_REPAIR_ROUND` adds `generatorDurationMs` / `validatorDurationMs`; a semantic `AI_GAME_VALIDATION_REJECTED` adds the validator `reason`, collapsed to one line and truncated to 200 characters. The topic in clear, questions, prompts, `playerId`, and player names are never logged. `topicHash` is for correlation only, not a security control: a guessable topic can be recovered by hashing candidates.
+
+To find all attempts for one topic in CloudWatch Logs Insights, compute its hash locally and filter on it:
+
+```bash
+node -e 'const t=process.argv[1].normalize("NFC").trim().toLowerCase().replace(/\s+/g," ");console.log(require("crypto").createHash("sha256").update(t).digest("hex"))' "Mundiales de Fútbol"
+```
 
 ## Generated-game API flow
 

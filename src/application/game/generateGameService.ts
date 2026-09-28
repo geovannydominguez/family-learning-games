@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type {
   Answer,
@@ -9,6 +9,15 @@ import type {
 } from "../../domain/game/types.ts";
 import type { GameRepository } from "../../repositories/game/GameRepository.ts";
 import { ApplicationError } from "../errors.ts";
+import {
+  ExecutionBudget,
+  defaultExecutionBudgetPolicy,
+  type BudgetedOperation,
+  type ExecutionBudgetPolicy,
+} from "./executionBudget.ts";
+
+/** Which call the execution budget refused to start (telemetry label only). */
+type BudgetExhaustedOperation = "generate" | "repair" | "technical_retry" | "validate";
 import type { PlayerRepository } from "../player/PlayerRepository.ts";
 import {
   InvalidGeneratedGameCandidateError,
@@ -47,6 +56,8 @@ const correlationIdPattern = /^[A-Za-z0-9._~=+/-]{1,128}$/;
 const defaultRepairRounds = 5;
 /** Bounded per-round retries for failures that produced no candidate content (guardrail, transport). */
 const defaultTechnicalRetriesPerRound = 1;
+/** Upper bound for the validator `reason` copied into server-side logs (ADR-015). */
+const maxLoggedReasonLength = 200;
 
 /**
  * Coarse, provider-neutral lifecycle event for the two-model generation
@@ -64,9 +75,19 @@ export interface GenerationPipelineEvent {
     | "AI_GAME_VALIDATION_REJECTED"
     | "AI_GAME_GENERATION_EXHAUSTED"
     | "AI_GAME_VALIDATION_ERROR"
-    | "AI_GAME_GUARDRAIL_INTERVENED";
+    | "AI_GAME_GUARDRAIL_INTERVENED"
+    | "AI_GAME_EXECUTION_BUDGET_EXHAUSTED";
   level: "info" | "warn" | "error";
   correlationId?: string;
+  /**
+   * ADR-015 generation context, present on every event so one operation can be
+   * correlated and diagnosed. `topicHash` is a SHA-256 fingerprint of the
+   * normalized topic for correlation only — the topic itself is never logged.
+   * No playerId, player name, or family metadata is ever included.
+   */
+  difficulty?: Difficulty;
+  targetAge?: number;
+  topicHash?: string;
   /** Repair round (1-based). `attempt` mirrors it for backward compatibility. */
   attempt: number;
   round?: number;
@@ -116,6 +137,24 @@ export interface GenerationPipelineEvent {
   guardrailStopReason?: string;
   generatorModel?: string;
   validatorModel?: string;
+  /** AI_GAME_REPAIR_ROUND: wall-clock time spent in generator / validator calls this round. */
+  generatorDurationMs?: number;
+  validatorDurationMs?: number;
+  /**
+   * Semantic AI_GAME_VALIDATION_REJECTED only: the validator's own explanation of
+   * its blocking issues, whitespace-collapsed and truncated to 200 characters.
+   * Server-side logs only; never returned to the client.
+   */
+  reason?: string;
+  /**
+   * AI_GAME_EXECUTION_BUDGET_EXHAUSTED: the call that was not started, its batch
+   * size, and why. `generate` is the first round, `repair` a later round,
+   * `technical_retry` a same-round retry after a no-content failure.
+   */
+  budgetedOperation?: BudgetExhaustedOperation;
+  batchSize?: number;
+  remainingTimeMs?: number;
+  requiredTimeMs?: number;
 }
 
 /**
@@ -155,6 +194,20 @@ interface GenerateGameServiceOptions {
   maxTechnicalRetriesPerRound?: number;
   /** Opaque model labels, for observability only. */
   models?: { generator?: string; validator?: string };
+  /** Source of randomness for answer-order shuffling. Defaults to `Math.random`. */
+  random?: () => number;
+  /** Monotonic-enough clock for call durations. Defaults to `Date.now`. */
+  now?: () => number;
+  /** Execution-budget thresholds (ADR-015). Defaults to `defaultExecutionBudgetPolicy`. */
+  executionBudgetPolicy?: ExecutionBudgetPolicy;
+}
+
+/** Non-sensitive context attached to every pipeline event of one operation. */
+interface GenerationTrace {
+  correlationId?: string;
+  difficulty: Difficulty;
+  targetAge: number;
+  topicHash: string;
 }
 
 export class GenerateGameService {
@@ -169,6 +222,9 @@ export class GenerateGameService {
   private readonly maxRepairRounds: number;
   private readonly maxTechnicalRetriesPerRound: number;
   private readonly models: { generator?: string; validator?: string };
+  private readonly random: () => number;
+  private readonly now: () => number;
+  private readonly executionBudgetPolicy: ExecutionBudgetPolicy;
 
   constructor(
     generator: GameGenerator,
@@ -191,6 +247,9 @@ export class GenerateGameService {
     this.maxTechnicalRetriesPerRound = nonNegativeInt(options.maxTechnicalRetriesPerRound)
       ?? defaultTechnicalRetriesPerRound;
     this.models = options.models ?? {};
+    this.random = options.random ?? Math.random;
+    this.now = options.now ?? Date.now;
+    this.executionBudgetPolicy = options.executionBudgetPolicy ?? defaultExecutionBudgetPolicy;
   }
 
   async generate(command: GenerateGameCommand): Promise<Game> {
@@ -213,8 +272,18 @@ export class GenerateGameService {
       questionCount: normalizedCommand.questionCount,
       targetAge: player.age,
     };
+    const trace: GenerationTrace = {
+      ...(correlationId ? { correlationId } : {}),
+      difficulty: request.difficulty,
+      targetAge: request.targetAge,
+      topicHash: topicFingerprint(request.topic),
+    };
+    const budget = new ExecutionBudget(
+      typeof command.remainingTimeMs === "function" ? command.remainingTimeMs : undefined,
+      this.executionBudgetPolicy,
+    );
     // Never persist before every question has passed every required validation.
-    const built = await this.assembleValidatedGame(request, correlationId);
+    const built = await this.assembleValidatedGame(request, trace, budget);
     const game: Game = {
       id: `ai-${this.createId()}`,
       title: built.title,
@@ -234,17 +303,18 @@ export class GenerateGameService {
   /**
    * Question-level repair pipeline. Valid questions are kept in an accepted
    * pool; only failed slots are re-requested. Each round:
-   *   Nova Micro generates `missingCount` candidates
+   *   the generator produces `missingCount` candidates
    *     → per-question structural validation  (valid ones survive)
    *     → uniqueness check against the accepted pool
-   *     → Nova Pro blind independent validation of the survivors
+   *     → blind independent validation of the survivors (GameValidator)
    *     → per-question deterministic comparison (valid ones join the pool)
    * The game is assembled and returned only when exactly 10 questions are
    * accepted. Technical failures of either model fail closed (never persist).
    */
   private async assembleValidatedGame(
     request: GenerateGameRequest,
-    correlationId: string | undefined,
+    trace: GenerationTrace,
+    budget: ExecutionBudget,
   ): Promise<{ title: string; category: Category; questions: Question[] }> {
     const categoryId = toCategorySlug(request.topic);
     const accepted: Question[] = [];
@@ -288,12 +358,28 @@ export class GenerateGameService {
       //        every further repair round — would be blocked the same way, so it
       //        is recorded once and finalizes the whole operation immediately
       //        instead of burning retries and rounds until the Lambda times out.
+      //    Every generation call (first attempt, technical retry, or repair
+      //    round) is started only if the execution budget still fits it.
       let raw: unknown;
+      let generatorDurationMs = 0;
+      let validatorDurationMs = 0;
+      let previousFailureType: GenerationFailureType | undefined;
       for (let technicalRetry = 0; ; technicalRetry += 1) {
-        this.emitEvent({
+        // The estimate is for THIS call's batch size (`missingCount`), not the
+        // final game size: a 1-question repair is costed as 1 question.
+        this.ensureBudget(trace, budget, {
+          check: "generate",
+          label: technicalRetry > 0 ? "technical_retry" : round > 1 ? "repair" : "generate",
+          batchSize: missingCount,
+          round,
+          acceptedQuestionCount: accepted.length,
+          // F2: a provider fault whose retry cannot be afforded is still a
+          // provider fault (502), never "invalid content" (422).
+          errorCode: previousFailureType === "provider_error" ? "AI_GENERATION_FAILED" : "AI_GENERATED_CONTENT_INVALID",
+        });
+        this.emitEvent(trace, {
           event: "AI_GAME_GENERATION_ATTEMPT",
           level: "info",
-          correlationId,
           attempt: round,
           round,
           technicalRetry,
@@ -301,16 +387,22 @@ export class GenerateGameService {
           acceptedQuestionCount: accepted.length,
           seenQuestionCount: seen.size,
         });
+        const generatorStartedAt = this.now();
         try {
           raw = await this.generator.generate(genRequest);
+          const elapsed = this.elapsedSince(generatorStartedAt);
+          generatorDurationMs += elapsed;
+          budget.recordGenerator(elapsed, missingCount);
           applyCategoryIdentity(raw as GeneratedGameDraft, categoryId);
           break;
         } catch (error) {
+          generatorDurationMs += this.elapsedSince(generatorStartedAt);
           const failure = classifyGenerationFailure(error);
-          this.emitFailure(round, correlationId, failure, technicalRetry);
+          previousFailureType = failure.failureType;
+          this.emitFailure(round, trace.correlationId, failure, technicalRetry);
           if (failure.failureType === "guardrail_intervened" || failure.failureType === "content_filtered") {
             // Guardrail intervention: no technical retry, no further repair round.
-            this.emitGuardrail(correlationId, round, missingCount, failure, technicalRetry);
+            this.emitGuardrail(trace, round, missingCount, failure, technicalRetry);
             throw new ApplicationError(
               "AI_GENERATION_BLOCKED",
               "AI game generation was blocked by content safety rules.",
@@ -344,11 +436,11 @@ export class GenerateGameService {
         const returnedCount = readQuestionsArray(raw).length;
         if (returnedCount !== missingCount) {
           unexpectedBatchCount = returnedCount;
-          this.emitFailure(round, correlationId, {
+          this.emitFailure(round, trace.correlationId, {
             failureType: "validation_failed",
             validationRule: "unexpected_question_count",
           });
-          this.emitRejected(correlationId, round, { issueTypes: ["unexpected_question_count"] });
+          this.emitRejected(trace, round, { issueTypes: ["unexpected_question_count"] });
           raw = undefined;
         }
       }
@@ -373,8 +465,8 @@ export class GenerateGameService {
           const rule = structuralRuleOf(error);
           roundStructuralIssues.push(rule);
           structuralRejectedCount += 1;
-          this.emitFailure(round, correlationId, classifyGenerationFailure(error));
-          this.emitRejected(correlationId, round, { issueTypes: [rule] });
+          this.emitFailure(round, trace.correlationId, classifyGenerationFailure(error));
+          this.emitRejected(trace, round, { issueTypes: [rule] });
           continue;
         }
         const dedupKey = questionDedupKey(question.text);
@@ -384,12 +476,12 @@ export class GenerateGameService {
         if (acceptedKeys.has(dedupKey) || roundTexts.has(dedupKey)) {
           roundStructuralIssues.push("duplicate_text");
           structuralRejectedCount += 1;
-          this.emitFailure(round, correlationId, {
+          this.emitFailure(round, trace.correlationId, {
             failureType: "validation_failed",
             validationRule: "duplicate_text",
             validationField: `questions[${candidates.length}].text`,
           });
-          this.emitRejected(correlationId, round, { issueTypes: ["duplicate_text"] });
+          this.emitRejected(trace, round, { issueTypes: ["duplicate_text"] });
           continue;
         }
         roundTexts.add(dedupKey);
@@ -401,12 +493,21 @@ export class GenerateGameService {
         candidates.push(question);
       }
 
-      // 3) Nova Pro blind independent validation of the structurally-valid candidates.
+      // 3) Blind independent validation (GameValidator) of the structurally-valid candidates.
       let acceptedThisRound = 0;
       let semanticRejectedCount = 0;
       let semanticIssueCount = 0;
       if (candidates.length > 0) {
+        this.ensureBudget(trace, budget, {
+          check: "validate",
+          label: "validate",
+          batchSize: candidates.length,
+          round,
+          acceptedQuestionCount: accepted.length,
+          errorCode: "AI_GENERATED_CONTENT_INVALID",
+        });
         let review: GameValidationResult;
+        const validatorStartedAt = this.now();
         try {
           review = await this.validator.validate({
             topic: request.topic,
@@ -419,11 +520,13 @@ export class GenerateGameService {
               questions: candidates,
             },
           });
+          validatorDurationMs = this.elapsedSince(validatorStartedAt);
+          budget.recordValidator(validatorDurationMs, candidates.length);
         } catch (error) {
-          this.emitEvent({
+          validatorDurationMs = this.elapsedSince(validatorStartedAt);
+          this.emitEvent(trace, {
             event: "AI_GAME_VALIDATION_ERROR",
             level: "error",
-            correlationId,
             attempt: round,
             round,
             questionCount: candidates.length,
@@ -449,13 +552,14 @@ export class GenerateGameService {
           semanticRejectedCount += 1;
           semanticIssueCount += failure.issueTypes.length;
           roundSemanticIssues.push(...failure.issueTypes);
-          this.emitRejected(correlationId, round, {
+          this.emitRejected(trace, round, {
             questionIndex: slot,
             issueTypes: failure.issueTypes,
             generatorAnswerIndex: failure.generatorAnswerIndex,
             validatorAnswerIndex: failure.validatorAnswerIndex,
             confident: failure.confident,
             ambiguous: failure.ambiguous,
+            ...(failure.validatorReason ? { reason: failure.validatorReason } : {}),
           });
         });
       }
@@ -464,10 +568,9 @@ export class GenerateGameService {
       // one rejected question can carry several issues, so issueCount >= it.
       const rejectedQuestionCount = structuralRejectedCount + semanticRejectedCount;
       const issueCount = roundStructuralIssues.length + semanticIssueCount;
-      this.emitEvent({
+      this.emitEvent(trace, {
         event: "AI_GAME_REPAIR_ROUND",
         level: "info",
-        correlationId,
         attempt: round,
         round,
         requestedQuestionCount: missingCount,
@@ -478,6 +581,8 @@ export class GenerateGameService {
         acceptedQuestionCount: accepted.length,
         seenQuestionCount: seen.size,
         missingCount: Math.max(0, questionCount - accepted.length),
+        generatorDurationMs,
+        validatorDurationMs,
       });
 
       if (accepted.length >= questionCount && meta) break;
@@ -489,10 +594,9 @@ export class GenerateGameService {
 
     if (accepted.length < questionCount || !meta) {
       const exhaustedRound = Math.min(round, this.maxRepairRounds);
-      this.emitEvent({
+      this.emitEvent(trace, {
         event: "AI_GAME_GENERATION_EXHAUSTED",
         level: "warn",
-        correlationId,
         attempt: exhaustedRound,
         round: exhaustedRound,
         acceptedQuestionCount: accepted.length,
@@ -501,11 +605,17 @@ export class GenerateGameService {
       throw new ApplicationError("AI_GENERATED_CONTENT_INVALID", "AI generated content did not pass validation.");
     }
 
-    const questions = accepted.slice(0, questionCount).map((question, index) => reindexQuestion(question, index));
-    this.emitEvent({
+    // ADR-015: the model is not trusted to randomize the correct-answer position
+    // (Claude drafts were observed to always mark option 0). Answers are shuffled
+    // here, after validation and BEFORE ids are reassigned, so neither the order
+    // nor the answer id (`q1a1`…) reveals which option is correct. The shuffle
+    // moves whole answer objects, so each `isCorrect` stays with its own text.
+    const questions = accepted
+      .slice(0, questionCount)
+      .map((question, index) => reindexQuestion(shuffleAnswers(question, this.random), index));
+    this.emitEvent(trace, {
       event: "AI_GAME_VALIDATION_SUCCEEDED",
       level: "info",
-      correlationId,
       attempt: round,
       round,
       questionCount,
@@ -515,9 +625,19 @@ export class GenerateGameService {
     return { title: meta.title, category: meta.category, questions };
   }
 
-  private emitEvent(event: Omit<GenerationPipelineEvent, "maxAttempts" | "generatorModel" | "validatorModel">): void {
+  private emitEvent(
+    trace: GenerationTrace,
+    event: Omit<
+      GenerationPipelineEvent,
+      "maxAttempts" | "generatorModel" | "validatorModel" | "correlationId" | "difficulty" | "targetAge" | "topicHash"
+    >,
+  ): void {
     this.logEvent({
       ...event,
+      ...(trace.correlationId ? { correlationId: trace.correlationId } : {}),
+      difficulty: trace.difficulty,
+      targetAge: trace.targetAge,
+      topicHash: trace.topicHash,
       maxAttempts: this.maxRepairRounds,
       ...(this.models.generator ? { generatorModel: this.models.generator } : {}),
       ...(this.models.validator ? { validatorModel: this.models.validator } : {}),
@@ -525,7 +645,7 @@ export class GenerateGameService {
   }
 
   private emitRejected(
-    correlationId: string | undefined,
+    trace: GenerationTrace,
     round: number,
     detail: {
       questionIndex?: number;
@@ -534,17 +654,61 @@ export class GenerateGameService {
       validatorAnswerIndex?: number | null;
       confident?: boolean;
       ambiguous?: boolean;
+      reason?: string;
     },
   ): void {
-    this.emitEvent({
+    this.emitEvent(trace, {
       event: "AI_GAME_VALIDATION_REJECTED",
       level: "warn",
-      correlationId,
       attempt: round,
       round,
       issueCount: 1,
       ...detail,
     });
+  }
+
+  /**
+   * Stops the operation in a controlled way when the remaining execution time
+   * cannot fit the next expensive AI call for its batch size (ADR-015). Only
+   * existing public error codes are used: `AI_GENERATED_CONTENT_INVALID` (422)
+   * when the missing work is content, `AI_GENERATION_FAILED` (502) when the
+   * call that cannot be afforded is the retry of a provider fault. The budget
+   * detail is visible only in server-side telemetry.
+   */
+  private ensureBudget(
+    trace: GenerationTrace,
+    budget: ExecutionBudget,
+    request: {
+      check: BudgetedOperation;
+      label: BudgetExhaustedOperation;
+      batchSize: number;
+      round: number;
+      acceptedQuestionCount: number;
+      errorCode: "AI_GENERATED_CONTENT_INVALID" | "AI_GENERATION_FAILED";
+    },
+  ): void {
+    const check = budget.check(request.check, request.batchSize);
+    if (check.sufficient) return;
+    this.emitEvent(trace, {
+      event: "AI_GAME_EXECUTION_BUDGET_EXHAUSTED",
+      level: "warn",
+      attempt: request.round,
+      round: request.round,
+      budgetedOperation: request.label,
+      batchSize: request.batchSize,
+      remainingTimeMs: check.remainingTimeMs,
+      requiredTimeMs: check.requiredTimeMs,
+      acceptedQuestionCount: request.acceptedQuestionCount,
+      missingCount: Math.max(0, questionCount - request.acceptedQuestionCount),
+    });
+    if (request.errorCode === "AI_GENERATION_FAILED") {
+      throw new ApplicationError("AI_GENERATION_FAILED", "AI game generation failed.");
+    }
+    throw new ApplicationError("AI_GENERATED_CONTENT_INVALID", "AI generated content did not pass validation.");
+  }
+
+  private elapsedSince(startedAt: number): number {
+    return Math.max(0, Math.round(this.now() - startedAt));
   }
 
   private emitFailure(
@@ -571,17 +735,16 @@ export class GenerateGameService {
   }
 
   private emitGuardrail(
-    correlationId: string | undefined,
+    trace: GenerationTrace,
     round: number,
     requestedQuestionCount: number,
     failure: GeneratedGameCandidateFailure,
     technicalRetry: number,
   ): void {
     const guardrail = summarizeGuardrail(failure.guardrail);
-    this.emitEvent({
+    this.emitEvent(trace, {
       event: "AI_GAME_GUARDRAIL_INTERVENED",
       level: "warn",
-      correlationId,
       attempt: round,
       round,
       technicalRetry,
@@ -616,6 +779,8 @@ interface QuestionReviewFailure {
   ambiguous: boolean;
   issueTypes: string[];
   reason: string;
+  /** Bounded validator explanation of its blocking issues, for server-side logs only. */
+  validatorReason?: string;
 }
 
 interface ReviewVerdict {
@@ -677,6 +842,9 @@ function evaluateReview(candidates: readonly Question[], review: GameValidationR
       && blockingIssueTypes.length === 0;
     if (questionValid) return;
 
+    const validatorReason = boundedReason(result.issues
+      .filter((issue) => isBlocking(issue))
+      .map((issue) => issue.reason));
     const issueTypes = [...new Set<string>([
       ...blockingIssueTypes,
       ...(answerIndex === null ? ["FACTUAL_UNCERTAINTY"] : []),
@@ -693,6 +861,7 @@ function evaluateReview(candidates: readonly Question[], review: GameValidationR
       ambiguous: result.ambiguous,
       issueTypes: issueTypes.length > 0 ? issueTypes : ["FACTUAL_UNCERTAINTY"],
       reason: issueTypes.join(", ") || "reviewer rejected this question",
+      ...(validatorReason ? { validatorReason } : {}),
     });
   });
 
@@ -718,6 +887,47 @@ function classifyGenerationFailure(error: unknown): GeneratedGameCandidateFailur
   // Any other error is a technical provider/transport fault. The original
   // error is discarded here so no provider detail can reach a diagnostic.
   return { failureType: "provider_error" };
+}
+
+/**
+ * Joins the validator's reasons, collapses control characters and whitespace,
+ * and truncates to `maxLoggedReasonLength`, so a model explanation can never
+ * produce an unbounded or multi-line log entry.
+ */
+function boundedReason(reasons: readonly string[]): string | undefined {
+  const joined = reasons
+    .join("; ")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (joined.length === 0) return undefined;
+  return joined.length > maxLoggedReasonLength ? `${joined.slice(0, maxLoggedReasonLength - 1)}…` : joined;
+}
+
+/**
+ * Diagnostic fingerprint of the requested topic (ADR-015): SHA-256 over the
+ * trimmed, NFC-normalized, lower-cased, whitespace-collapsed topic. It lets
+ * several failed operations for the same topic be correlated without logging
+ * the topic itself. It is not a security mechanism: a short, guessable topic can
+ * be recovered by hashing candidates, so it must never be used for authorization.
+ */
+export function topicFingerprint(topic: string): string {
+  const normalized = topic.normalize("NFC").trim().toLowerCase().replace(/\s+/g, " ");
+  return createHash("sha256").update(normalized, "utf8").digest("hex");
+}
+
+/**
+ * Fisher–Yates shuffle of a question's answers. Whole answer objects are moved,
+ * so the correct-answer association is preserved by construction; exactly one
+ * answer still has `isCorrect: true` and it keeps its own text.
+ */
+export function shuffleAnswers(question: Question, random: () => number): Question {
+  const answers = [...question.answers];
+  for (let index = answers.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.min(index, Math.floor(random() * (index + 1)));
+    [answers[index], answers[swapIndex]] = [answers[swapIndex], answers[index]];
+  }
+  return { ...question, answers };
 }
 
 function safeCorrelationId(value: unknown): string | undefined {

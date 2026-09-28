@@ -409,6 +409,87 @@ test("system prompt requires meaningful intra-game diversity across the 10 quest
   assert.ok(prompt.includes("Target player age: 4 years old."));
 });
 
+async function systemPromptFor(overrides: Partial<GenerateGameRequest>): Promise<string> {
+  const commands: ConverseCommand[] = [];
+  const generator = new BedrockGameGenerator({ send: async (command: ConverseCommand) => {
+    commands.push(command);
+    return textResponse(JSON.stringify(validPayload(overrides.questionCount ?? 10)));
+  } }, { modelId: "model", guardrailIdentifier: "guardrail", guardrailVersion: "1" });
+  await generator.generate({ ...request, ...overrides });
+  return commands[0].input.system?.[0].text ?? "";
+}
+
+test("ADR-015: each difficulty gets its own explicit semantics, and only the requested one", async () => {
+  const easy = await systemPromptFor({ difficulty: "easy" });
+  const normal = await systemPromptFor({ difficulty: "normal" });
+  const hard = await systemPromptFor({ difficulty: "hard" });
+
+  for (const rule of ["Requested difficulty: EASY.", "basic, widely recognizable facts", "direct recall", "clearly distinguishable"]) {
+    assert.ok(easy.includes(rule), `easy prompt missing: ${rule}`);
+  }
+  for (const rule of [
+    "Requested difficulty: NORMAL.",
+    "more specific topic knowledge",
+    "less obvious",
+    "plausible alternatives from the same conceptual space",
+    "must not be discoverable merely because the other options are unrelated",
+  ]) assert.ok(normal.includes(rule), `normal prompt missing: ${rule}`);
+  for (const rule of [
+    "Requested difficulty: HARD.",
+    "detailed or less obvious topic knowledge",
+    "events, facts, records, chronology, characters, editions, relationships",
+    "Do not fill the game with basic introductory questions that would naturally qualify as easy",
+    "strong and plausible",
+    "not adult, university-level",
+    "intentionally ambiguous",
+  ]) assert.ok(hard.includes(rule), `hard prompt missing: ${rule}`);
+
+  assert.equal(easy.includes("Requested difficulty: HARD."), false);
+  assert.equal(hard.includes("Requested difficulty: EASY."), false);
+  assert.equal(normal.includes("Requested difficulty: HARD."), false);
+  // The prompt no longer frames every game as "simple", which contradicts hard.
+  assert.equal(hard.includes("simple, family-friendly"), false);
+});
+
+test("ADR-015: targetAge and difficulty stay independent in the prompt", async () => {
+  const youngHard = await systemPromptFor({ difficulty: "hard", targetAge: 6 });
+  const olderEasy = await systemPromptFor({ difficulty: "easy", targetAge: 12 });
+
+  // Same age, every difficulty: the age rules are identical; only the difficulty block changes.
+  const youngEasy = await systemPromptFor({ difficulty: "easy", targetAge: 6 });
+  const ageBlock = (prompt: string) => prompt.slice(prompt.indexOf("Target player age:"), prompt.indexOf("Requested difficulty:"));
+  assert.equal(ageBlock(youngHard), ageBlock(youngEasy));
+  assert.ok(youngHard.includes("Target player age: 6 years old."));
+  assert.ok(youngHard.includes("powers or exponents")); // young-child limits still apply to hard
+  assert.ok(youngHard.includes("Difficulty and target age are independent"));
+  assert.ok(youngHard.includes("Every difficulty level must stay fully appropriate for the target age"));
+  // An older player on easy gets easy semantics, not age-derived difficulty.
+  assert.ok(olderEasy.includes("Requested difficulty: EASY."));
+  assert.ok(olderEasy.includes("Target player age: 12 years old."));
+  assert.equal(olderEasy.includes("powers or exponents"), false);
+});
+
+test("ADR-015: intra-game diversity and plausible same-kind distractors are explicit", async () => {
+  const prompt = await systemPromptFor({ difficulty: "normal" });
+  for (const rule of [
+    "Do not ask two questions that test the same fact or idea with different wording",
+    "do not let one question give away the answer to another",
+    "people or characters, events, chronology, places, rules, records, relationships, concepts, and notable facts",
+    "exactly one option is correct",
+    "never make a distractor partly correct or add ambiguity to make a question harder",
+    "same sport, franchise, era, or unit",
+    "never revealed by being the only option that fits the question",
+  ]) assert.ok(prompt.includes(rule), `missing rule: ${rule}`);
+
+  const single = await systemPromptFor({ questionCount: 1 });
+  assert.ok(single.includes("Do not test the same fact or idea as another question with different wording"));
+});
+
+test("ADR-015: the prompt never asks the model to randomize the correct-answer position", async () => {
+  const prompt = await systemPromptFor({ difficulty: "hard" });
+  assert.equal(/shuffle|randomi[sz]e/i.test(prompt), false);
+});
+
 test("system prompt forbids duplicate question and answer texts and asks for a pre-return check", async () => {
   const commands: ConverseCommand[] = [];
   const generator = new BedrockGameGenerator({ send: async (command: ConverseCommand) => {
