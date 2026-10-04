@@ -13,7 +13,10 @@ export type ApplicationErrorCode =
   | "INVALID_PLAYER"
   | "INVALID_PLAYER_AGE"
   | "PLAYER_NOT_FOUND"
-  | "PLAYER_CONFLICT";
+  | "PLAYER_CONFLICT"
+  | "QUESTION_AUDIO_DISABLED"
+  | "QUESTION_AUDIO_UNSUPPORTED"
+  | "QUESTION_AUDIO_FAILED";
 
 export class ApplicationError extends Error {
   readonly code: ApplicationErrorCode;

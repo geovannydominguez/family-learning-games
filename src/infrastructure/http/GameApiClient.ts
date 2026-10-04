@@ -6,6 +6,7 @@ import type {
   SubmitAnswerResponse,
 } from "../../application/game/gameSessionContracts.ts";
 import type { GenerateGameCommand } from "../../application/game/GameGenerator.ts";
+import type { QuestionAudioResponse } from "../../application/media/questionSpeech.ts";
 import type {
   CreatePlayerRequest,
   PlayersListResponse,
@@ -76,6 +77,14 @@ export class GameApiClient {
       method: "POST",
       body: JSON.stringify({ answerId }),
     });
+  }
+
+  /** v0.8: identifiers only — the backend derives the spoken text from the persisted game. */
+  getQuestionAudio(gameId: string, questionId: string): Promise<QuestionAudioResponse> {
+    return this.request(
+      `/games/${encodeURIComponent(gameId)}/questions/${encodeURIComponent(questionId)}/audio`,
+      { method: "POST", body: "{}" },
+    );
   }
 
   async listPlayers(): Promise<Player[]> {

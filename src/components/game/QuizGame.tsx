@@ -6,6 +6,7 @@ import type { AnswerFeedback, GameSetupResponse, PublicGame, PublicGameSession }
 import type { Category, Difficulty } from "@/domain/game/types";
 import type { Player } from "@/domain/player/types";
 import { createGameApiClient } from "@/infrastructure/http/GameApiClient";
+import { QuestionAudioButton, QuestionImageView } from "./QuestionMedia";
 import { buildStartSessionCommand, createdGameDifficulty, gameUiErrorMessage, selectCreatedGames } from "./gameUiState";
 
 interface PlayerFormState {
@@ -380,7 +381,9 @@ export function QuizGame() {
         <div className="flex items-center justify-between gap-4 text-sm font-bold text-slate-600 sm:text-base"><span>Pregunta {session.currentQuestionIndex + 1} de {session.totalQuestions}</span><span aria-label={`${displayedScore} respuestas correctas`}>⭐ {displayedScore} puntos</span></div>
         <div className="mt-3 h-3 overflow-hidden rounded-full bg-violet-100" role="progressbar" aria-label="Progreso de la partida" aria-valuemin={1} aria-valuemax={session.totalQuestions} aria-valuenow={session.currentQuestionIndex + 1}><div className="h-full rounded-full bg-violet-600 transition-all" style={{ width: `${progress}%` }} /></div>
         {question.emoji && <span className="mb-4 mt-8 block text-center text-7xl" aria-hidden="true">{question.emoji}</span>}
+        {question.media?.image && <QuestionImageView key={question.id} image={question.media.image} />}
         <h1 ref={headingRef} id="question-title" tabIndex={-1} className="mt-8 text-2xl font-black leading-tight text-slate-900 outline-none sm:text-4xl">{question.text}</h1>
+        {session.gameId && <QuestionAudioButton gameId={session.gameId} questionId={question.id} />}
         <fieldset aria-labelledby="question-title"><div className="mt-7 grid gap-3 sm:grid-cols-2">{question.answers.map((answerOption) => {
           const selected = feedback?.selectedAnswerId === answerOption.id;
           let stateClass = "border-slate-200 bg-white hover:border-violet-400 hover:bg-violet-50";

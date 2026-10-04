@@ -172,3 +172,26 @@ test("createPlayer, updatePlayer and deletePlayer send the expected requests", a
   assert.equal(requests[2].input, "https://api.example.com/players/amelia");
   assert.equal(requests[2].method, "DELETE");
 });
+
+test("v0.8: getQuestionAudio sends only identifiers (empty JSON body) to the audio route", async () => {
+  const requests: Array<{ input: string; init?: RequestInit }> = [];
+  const fetcher = async (input: string | URL | Request, init?: RequestInit) => {
+    requests.push({ input: String(input), init });
+    return new Response(JSON.stringify({ audioUrl: "https://signed.example/a.mp3", expiresAt: "2026-10-03T12:15:00.000Z" }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const client = new GameApiClient("https://api.example.com/", fetcher);
+  const response = await client.getQuestionAudio("ai-1", "q 1");
+  assert.deepEqual(response, { audioUrl: "https://signed.example/a.mp3", expiresAt: "2026-10-03T12:15:00.000Z" });
+  assert.equal(requests[0].input, "https://api.example.com/games/ai-1/questions/q%201/audio");
+  assert.equal(requests[0].init?.method, "POST");
+  assert.equal(requests[0].init?.body, "{}");
+});
+
+test("v0.8: audio failures surface as GameApiError with the safe backend code", async () => {
+  const client = new GameApiClient("https://api.example.com", async () => new Response(
+    JSON.stringify({ error: { code: "QUESTION_AUDIO_FAILED", message: "Question audio is temporarily unavailable." } }),
+    { status: 502, headers: { "content-type": "application/json" } },
+  ));
+  await assert.rejects(client.getQuestionAudio("animals", "q1"), (error: unknown) =>
+    error instanceof GameApiError && error.code === "QUESTION_AUDIO_FAILED" && error.status === 502);
+});

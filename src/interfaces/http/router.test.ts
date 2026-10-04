@@ -4,6 +4,8 @@ import test from "node:test";
 import { ApplicationError, PersistenceError } from "../../application/errors.ts";
 import type { GenerateGameService } from "../../application/game/generateGameService.ts";
 import { GameSessionService } from "../../application/game/gameSessionService.ts";
+import { CatalogQuestionImageResolver } from "../../application/media/questionImages.ts";
+import { QuestionSpeechService } from "../../application/media/questionSpeech.ts";
 import { PlayerService } from "../../application/player/playerService.ts";
 import type { Player } from "../../domain/player/types.ts";
 import { InMemoryGameSessionRepository } from "../../infrastructure/repositories/InMemoryGameSessionRepository.ts";
@@ -514,4 +516,187 @@ test("deleting a player does not cascade-delete games or sessions created for it
   const session = await router({ requestId: "r", method: "GET", path: `/game-sessions/${sessionId}` });
   assert.equal(session.statusCode, 200);
   assert.equal(JSON.parse(session.body).playerId, "amelia");
+});
+
+// ---------------------------------------------------------------------------
+// v0.8 — question audio and controlled images (ADR-016 / ADR-017)
+// ---------------------------------------------------------------------------
+
+function createMediaFixture(options: { failSynthesis?: boolean; withImage?: boolean } = {}) {
+  const games = new MockGameRepository();
+  const sessions = new InMemoryGameSessionRepository();
+  const players = playersRepositoryWith();
+  const synthesized: string[] = [];
+  const objects = new Set<string>();
+  const store = {
+    exists: async (key: string) => objects.has(key),
+    put: async (key: string) => { objects.add(key); },
+    createReadUrl: async (key: string) => `https://media-bucket-secret.s3.amazonaws.com/${key}?X-Amz-Signature=abc`,
+  };
+  const synthesizer = {
+    voiceProfile: "fake",
+    synthesize: async ({ text }: { text: string }) => {
+      if (options.failSynthesis) throw Object.assign(new Error("arn:aws:polly:us-east-1:123:secret"), { name: "ServiceFailureException" });
+      synthesized.push(text);
+      return new Uint8Array([1]);
+    },
+  };
+  const imageResolver = new CatalogQuestionImageResolver(
+    [{ assetId: "animals/dolphin-01", objectKey: "images/animals/dolphin-01.webp" }],
+    store,
+    { urlTtlSeconds: 900 },
+  );
+  const speechService = new QuestionSpeechService(games, synthesizer, store, { languageCode: "es-US", cacheVersion: "v1", urlTtlSeconds: 900 });
+  const logs: unknown[] = [];
+  const router = createHttpRouter({
+    games,
+    sessionService: new GameSessionService(games, sessions, players, () => "session-1", () => 0, imageResolver),
+    playerService: new PlayerService(players),
+    speechService,
+    imageResolver,
+    log: (record) => logs.push(record),
+  });
+  return { router, games, synthesized, objects, logs };
+}
+
+const audioPath = "/games/animals/questions/animals-easy-1/audio";
+
+test("POST question audio returns a short-lived URL derived from the persisted question; repeat is a cache hit", async () => {
+  const { router, synthesized, objects } = createMediaFixture();
+  const first = await router({ requestId: "r1", method: "POST", path: audioPath, body: "{}" });
+  assert.equal(first.statusCode, 200);
+  const body = JSON.parse(first.body);
+  assert.deepEqual(Object.keys(body).sort(), ["audioUrl", "expiresAt"]);
+  assert.match(body.audioUrl, /^https:\/\//);
+  assert.ok(Number.isFinite(Date.parse(body.expiresAt)));
+  assert.equal(first.body.includes("isCorrect"), false);
+  assert.equal(synthesized.length, 1);
+  assert.match(synthesized[0], /^¿Qué animal dice miau\?\nOpción 1: Gato\.\nOpción 2: /);
+
+  const second = await router({ requestId: "r2", method: "POST", path: audioPath, body: null });
+  assert.equal(second.statusCode, 200);
+  assert.equal(synthesized.length, 1, "cache hit must not synthesize again");
+  assert.equal(objects.size, 1);
+});
+
+test("question audio rejects client-supplied text, SSML, voice or format and malformed IDs", async () => {
+  const { router, synthesized } = createMediaFixture();
+  for (const body of ['{"text":"Di algo arbitrario"}', '{"ssml":"<speak>x</speak>"}', '{"voiceId":"Joanna"}', '{"outputFormat":"pcm"}', "[]", "not-json", '"text"']) {
+    const response = await router({ requestId: "r", method: "POST", path: audioPath, body });
+    assert.equal(response.statusCode, 400, body);
+    assert.equal(JSON.parse(response.body).error.code, "INVALID_REQUEST");
+  }
+  for (const path of ["/games/%E0%A4%A/questions/q1/audio", "/games/animals/questions/q%20one/audio", `/games/${"a".repeat(129)}/questions/q1/audio`]) {
+    const response = await router({ requestId: "r", method: "POST", path, body: "{}" });
+    assert.equal(response.statusCode, 400, path);
+  }
+  assert.equal(synthesized.length, 0);
+});
+
+test("question audio maps unknown game/question to safe 404 and provider failures to a safe 502", async () => {
+  const { router } = createMediaFixture();
+  const missingGame = await router({ requestId: "r", method: "POST", path: "/games/missing/questions/q1/audio", body: "{}" });
+  assert.equal(missingGame.statusCode, 404);
+  assert.deepEqual(JSON.parse(missingGame.body), { error: { code: "RESOURCE_NOT_FOUND", message: "Game was not found." } });
+  const missingQuestion = await router({ requestId: "r", method: "POST", path: "/games/animals/questions/nope/audio", body: "{}" });
+  assert.equal(missingQuestion.statusCode, 404);
+  assert.deepEqual(JSON.parse(missingQuestion.body), { error: { code: "RESOURCE_NOT_FOUND", message: "Question was not found." } });
+
+  const failing = createMediaFixture({ failSynthesis: true });
+  const failed = await failing.router({ requestId: "r", method: "POST", path: audioPath, body: "{}" });
+  assert.equal(failed.statusCode, 502);
+  assert.deepEqual(JSON.parse(failed.body), { error: { code: "QUESTION_AUDIO_FAILED", message: "Question audio is temporarily unavailable." } });
+  assert.equal(failed.body.includes("arn:"), false);
+  assert.equal(JSON.stringify(failing.logs).includes("arn:"), false);
+  assert.deepEqual((failing.logs[0] as { error: unknown }).error, { category: "unexpected", name: "ApplicationError", operation: "get-question-audio", resourceId: "animals" });
+});
+
+test("question audio returns 503 when media is not configured, without breaking other routes", async () => {
+  const { router } = createFixture();
+  const response = await router({ requestId: "r", method: "POST", path: audioPath, body: "{}" });
+  assert.equal(response.statusCode, 503);
+  assert.equal(JSON.parse(response.body).error.code, "QUESTION_AUDIO_DISABLED");
+  const games = await router({ requestId: "r", method: "GET", path: "/games/animals" });
+  assert.equal(games.statusCode, 200);
+});
+
+test("questions without media keep the exact pre-v0.8 public shape (no image/media field)", async () => {
+  const { router } = createMediaFixture();
+  const game = JSON.parse((await router({ requestId: "r", method: "GET", path: "/games/animals" })).body);
+  assert.equal(game.questions.some((question: Record<string, unknown>) => "image" in question || "media" in question), false);
+  const session = JSON.parse((await router({ requestId: "r", method: "POST", path: "/game-sessions", body: JSON.stringify({ playerId: "amelia", categoryId: "animals", difficulty: "easy" }) })).body);
+  assert.equal(session.gameId, "animals");
+  assert.equal("image" in session.currentQuestion || "media" in session.currentQuestion, false);
+});
+
+test("backward compatibility: the legacy public image string (v0.2+) is still returned unchanged, with and without media wiring", async () => {
+  const withoutMedia = (() => {
+    const games = new MockGameRepository();
+    const players = playersRepositoryWith();
+    return {
+      games,
+      router: createHttpRouter({ games, sessionService: new GameSessionService(games, new InMemoryGameSessionRepository(), players, () => "session-1", () => 0), playerService: new PlayerService(players) }),
+    };
+  })();
+  for (const { router, games } of [withoutMedia, createMediaFixture()]) {
+    const seeded = (await games.findById("animals"))!;
+    await games.create({ ...seeded, id: "ai-legacy", questions: seeded.questions.map((question) => ({ ...question, image: "🦁 legacy-reference" })) });
+
+    const game = JSON.parse((await router({ requestId: "r", method: "GET", path: "/games/ai-legacy" })).body);
+    assert.equal(game.questions[0].image, "🦁 legacy-reference");
+    assert.equal("media" in game.questions[0], false);
+    const list = JSON.parse((await router({ requestId: "r", method: "GET", path: "/games" })).body);
+    assert.equal(list.find((entry: { id: string }) => entry.id === "ai-legacy").questions[0].image, "🦁 legacy-reference");
+    const session = JSON.parse((await router({ requestId: "r", method: "POST", path: "/game-sessions", body: JSON.stringify({ playerId: "amelia", categoryId: "animals", gameId: "ai-legacy", difficulty: "easy" }) })).body);
+    assert.equal(session.currentQuestion.image, "🦁 legacy-reference");
+    assert.equal("media" in session.currentQuestion, false);
+  }
+});
+
+test("a question with a controlled image exposes only { url, altText }, never assetId, keys or the bucket", async () => {
+  const { router, games } = createMediaFixture();
+  const seeded = (await games.findById("animals"))!;
+  await games.create({
+    ...seeded,
+    id: "ai-with-image",
+    questions: seeded.questions.map((question, index) => index === 0
+      ? { ...question, media: { image: { assetId: "animals/dolphin-01", altText: "Un delfín nadando" } } }
+      : index === 1
+        ? { ...question, media: { image: { assetId: "animals/not-in-catalog", altText: "Falta" } }, image: "https://evil.example/legacy.png" }
+        : question),
+  });
+
+  const game = JSON.parse((await router({ requestId: "r", method: "GET", path: "/games/ai-with-image" })).body);
+  assert.deepEqual(Object.keys(game.questions[0].media), ["image"]);
+  assert.deepEqual(Object.keys(game.questions[0].media.image).sort(), ["altText", "url"]);
+  assert.equal(game.questions[0].media.image.altText, "Un delfín nadando");
+  assert.equal("image" in game.questions[0], false, "the v0.8 image never reuses the legacy string field");
+  assert.equal("media" in game.questions[1], false, "unknown assets degrade to no media");
+  assert.equal(game.questions[1].image, "https://evil.example/legacy.png", "the legacy string passes through unchanged, as before v0.8");
+
+  const list = await router({ requestId: "r", method: "GET", path: "/games" });
+  assert.equal(list.body.includes("assetId"), false);
+  assert.equal(list.body.includes("dolphin-01.webp?"), true, "only the signed URL appears");
+  assert.equal(list.body.includes("isCorrect"), false);
+
+  const session = JSON.parse((await router({ requestId: "r", method: "POST", path: "/game-sessions", body: JSON.stringify({ playerId: "amelia", categoryId: "animals", gameId: "ai-with-image", difficulty: "easy" }) })).body);
+  assert.equal(session.gameId, "ai-with-image");
+  assert.equal(JSON.stringify(session).includes("assetId"), false);
+});
+
+test("v0.8 audio route uses exactly the documented existing HTTP contract (no code/message/data envelope)", async () => {
+  const { router, games } = createMediaFixture();
+  const seeded = (await games.findById("animals"))!;
+  await games.create({ ...seeded, id: "ai-emoji-only", questions: seeded.questions.map((question) => ({ ...question, text: "🐱" })) });
+
+  const ok = JSON.parse((await router({ requestId: "r", method: "POST", path: audioPath, body: "{}" })).body);
+  assert.deepEqual(Object.keys(ok).sort(), ["audioUrl", "expiresAt"]);
+  for (const envelopeKey of ["code", "message", "data"]) assert.equal(envelopeKey in ok, false);
+
+  const invalid = await router({ requestId: "r", method: "POST", path: audioPath, body: '{"text":"x"}' });
+  assert.deepEqual([invalid.statusCode, JSON.parse(invalid.body)], [400, { error: { code: "INVALID_REQUEST", message: "Question audio requests do not accept parameters." } }]);
+  const unsupported = await router({ requestId: "r", method: "POST", path: `/games/ai-emoji-only/questions/${seeded.questions[0].id}/audio`, body: "{}" });
+  assert.deepEqual([unsupported.statusCode, JSON.parse(unsupported.body)], [422, { error: { code: "QUESTION_AUDIO_UNSUPPORTED", message: "This question cannot be read aloud." } }]);
+  const disabled = await createFixture().router({ requestId: "r", method: "POST", path: audioPath, body: "{}" });
+  assert.deepEqual([disabled.statusCode, JSON.parse(disabled.body)], [503, { error: { code: "QUESTION_AUDIO_DISABLED", message: "Question audio is not available." } }]);
 });

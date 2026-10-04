@@ -1,4 +1,5 @@
 import type { Category, Difficulty, Player } from "../../domain/game/types.ts";
+import type { PublicQuestionImage } from "../media/questionImages.ts";
 
 export interface PublicAnswer {
   id: string;
@@ -10,7 +11,19 @@ export interface PublicQuestion {
   text: string;
   answers: PublicAnswer[];
   emoji?: string;
+  /**
+   * Legacy public field (since v0.2): the persisted free-form `Question.image`
+   * passed through unchanged. Kept for backward compatibility; it is not a
+   * controlled v0.8 asset and the v0.8 frontend does not render it.
+   */
   image?: string;
+  /** v0.8 (ADR-016), additive: resolved controlled media. Absent when there is none. */
+  media?: PublicQuestionMedia;
+}
+
+export interface PublicQuestionMedia {
+  /** Short-lived signed URL plus alt text. Never an asset ID, bucket name or object key. */
+  image?: PublicQuestionImage;
 }
 
 export interface PublicGameQuestion extends PublicQuestion {
@@ -32,6 +45,8 @@ export interface PublicGame {
 
 export interface PublicGameSession {
   id: string;
+  /** v0.8: the persisted game the session plays, needed to request question audio. */
+  gameId?: string;
   player: Player;
   /** The persistent family player profile associated with this session (v0.6, optional for historical sessions). */
   playerId?: string;

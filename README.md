@@ -1,6 +1,6 @@
 # Family Learning Games
 
-Family Learning Games v0.5 publishes the Next.js frontend on AWS Amplify Hosting, giving the application built through v0.1–v0.4 a public HTTPS URL. Nothing about the game, its persistence, or its AI generation changes: the browser still talks to the same API Gateway/Lambda backend, just from the Internet instead of `localhost:3000`.
+**Family Learning Games v0.8 — FASE 8: Audio / imágenes.** A family quiz app published at `https://play.joamgames.com` as an installable, online-first PWA (v0.7, ADR-014) served by AWS Amplify Hosting, backed by one API Gateway HTTP API and one Lambda with DynamoDB (games, sessions, family player profiles). AI-generated games use a two-model Claude Sonnet 4.6 Generator/Validator pipeline on Amazon Bedrock with age-aware personalization (v0.6) and the v0.7.1 quality and execution-budget hardening. v0.8 adds on-demand spoken questions through Amazon Polly and optional curated question images, both stored in one private S3 bucket and delivered through short-lived signed URLs (ADR-016, ADR-017).
 
 AI generation is **disabled by default**. Enabling it is an intentional deployment decision.
 
@@ -21,10 +21,12 @@ One Lambda router
     ↓
 Application / Domain
     ├── GameGenerator port → BedrockGameGenerator → Amazon Bedrock
-    └── Repository ports → DynamoDB repositories → Games + GameSessions
+    ├── SpeechSynthesizer port → PollySpeechSynthesizer → Amazon Polly   (v0.8)
+    ├── MediaObjectStore port → S3MediaObjectStore → private S3 media bucket (v0.8)
+    └── Repository ports → DynamoDB repositories → Games + GameSessions + Players
 ```
 
-The Domain and Application layers remain AWS-independent. The browser never receives AWS, model, Guardrail, prompt, or answer-key details. Generated content passes through a fixed product prompt, Bedrock Guardrail, deep application validation, and at most one content-only retry before it is stored. Amplify Hosting only builds and serves the frontend; it never gains AWS credentials of its own and never becomes a second backend.
+The Domain and Application layers remain AWS-independent. The browser never receives AWS, model, Guardrail, prompt, or answer-key details. Generated content passes through a fixed product prompt, Bedrock Guardrail, an independent validator, and deep application validation, with bounded question-level repair rounds (v0.7.1), before it is stored. Amplify Hosting only builds and serves the frontend; it never gains AWS credentials of its own and never becomes a second backend.
 
 ## Local verification
 
@@ -53,6 +55,8 @@ Tests use injected clients and do not call live AWS services. `npm run build` pr
 | `deploymentRegion` | `us-east-1` | Region for the complete stack, including Bedrock Runtime, its model ARN, and the Guardrail. |
 | `generationThrottleRateLimit` | `1` | Rate limit for `POST /games/generate`, in requests/second. |
 | `generationThrottleBurstLimit` | `2` | Burst limit for `POST /games/generate`. |
+| `audioCacheVersion` | `v1` | Part of the audio cache key; bump it to invalidate cached audio after a voice/prosody policy change. |
+| `audioCacheExpirationDays` | `30` | Lifecycle expiration for the derived `audio-cache/` prefix only. |
 
 Boolean context values accept only `true` or `false`. Throttle values must be positive, and the burst limit must be an integer. Each origin must be an `http://` or `https://` URL with no trailing slash; the stack never accepts `*` as an origin.
 Choose one `<region>` for the deployment and repeat `-c deploymentRegion=<region>` on every CDK lifecycle command. Omitting it targets the default `us-east-1`, regardless of the AWS profile's configured region.
@@ -65,7 +69,7 @@ Only `POST /games/generate` is throttled at the API stage. A `429` response is s
 
 ## Manual deployment
 
-Replace `<aws-profile>` before copying these examples. The commands below are operational instructions; **none were executed against a real AWS account while documenting v0.5**.
+Replace `<aws-profile>` before copying these examples. The commands below are operational instructions; **none were executed against a real AWS account while documenting v0.5–v0.8**.
 
 ```bash
 # Verify the target account and configured region first.
@@ -190,6 +194,34 @@ To find all attempts for one topic in CloudWatch Logs Insights, compute its hash
 node -e 'const t=process.argv[1].normalize("NFC").trim().toLowerCase().replace(/\s+/g," ");console.log(require("crypto").createHash("sha256").update(t).digest("hex"))' "Mundiales de Fútbol"
 ```
 
+## Question audio and images (v0.8)
+
+See `docs/architecture/ARCHITECTURE-V0.8.md`, `ADR-016-game-media-assets-private-s3.md` and `ADR-017-amazon-polly-question-audio.md`. Media is an optional enhancement: every game stays fully playable when audio or images fail.
+
+**Audio.** The question screen has an explicit "🔊 Escuchar pregunta" button (never autoplay). It calls:
+
+```bash
+curl --fail-with-body --show-error --silent \
+  -X POST "${API_URL}/games/<gameId>/questions/<questionId>/audio" \
+  -H 'content-type: application/json' -d '{}'
+# 200 → {"audioUrl":"<short-lived signed URL>","expiresAt":"2026-10-03T12:15:00.000Z"}
+```
+
+The request accepts identifiers only; any body field (`text`, `ssml`, `voiceId`, …) is rejected with `400 INVALID_REQUEST`, so the API is never a general-purpose TTS proxy. The backend loads the persisted game, builds Spanish plain text from the question and its options in displayed order (`Opción 1: …`), never including `isCorrect`, IDs, emoji or player data, and bounds it to 1500 characters. The MP3 is cached in the private bucket at `audio-cache/<version>/<sha256(version, language, voice profile, text)>.mp3`: a cache hit returns a fresh signed URL without calling Polly; a miss synthesizes once and stores the object. Signed URLs live 900 s and are never persisted or logged. v0.8 has one fixed speech profile, not configurable per deploy: voice `Lupe`, engine `neural`, language `es-US` (sent as Polly `LanguageCode`), output `mp3`. The spoken labels are Spanish; there is no language or voice selection and no i18n. Known limitation: two simultaneous cache-miss requests for the same question may each call Polly once (identical object, bounded cost). Responses use the existing HTTP contract (endpoint-specific success body; errors as `{"error":{"code","message"}}`). Errors: `400 INVALID_REQUEST` (any body field or malformed ID), `404 RESOURCE_NOT_FOUND` (unknown game/question), `422 QUESTION_AUDIO_UNSUPPORTED` (nothing speakable / too long), `502 QUESTION_AUDIO_FAILED` (Polly/S3 failure, no provider details), `503 QUESTION_AUDIO_DISABLED` (no media bucket configured). Audio is never synthesized during `POST /games/generate`; the v0.7.1 AI pipeline and execution budget are unchanged. Structured events: `QUESTION_AUDIO_REQUESTED`, `_CACHE_HIT`, `_CACHE_MISS`, `_SYNTHESIZED` (with `durationMs`), `_FAILED` (with a safe `stage`/`errorName`).
+
+**Images.** A question may carry `media.image = { assetId, altText }` (a logical, curated reference, never a URL). Public game/session question DTOs then expose it additively as `media: { image: { url, altText } }` with a 900 s signed URL; questions without an image keep exactly the previous shape. The legacy public `image` string (since v0.2, a free-form reference the AI Generator may emit) is unchanged and still passed through for backward compatibility; the frontend renders only `media.image`. Images are resolved only through the controlled catalog `src/data/mediaCatalog.json` (`assetId → images/….webp|png|jpg`); unknown, invalid or failing assets degrade to text-only (`QUESTION_IMAGE_MISSING` / `_FAILED` events). The catalog ships empty. To add a curated image:
+
+1. Prepare a child-appropriate, licensed image that does not reveal the answer, as WebP (preferred), PNG or JPEG, at most 300 KB.
+2. Upload it to the media bucket (`MediaBucketName` stack output) under `images/`, e.g. `aws s3 cp dolphin-01.webp s3://<MediaBucketName>/images/animals/dolphin-01.webp --content-type image/webp`.
+3. Register `{ "assetId": "animals/dolphin-01", "objectKey": "images/animals/dolphin-01.webp" }` in `src/data/mediaCatalog.json` and redeploy the backend.
+4. Reference it from a seeded question (`"media": { "image": { "assetId": "animals/dolphin-01", "altText": "Un delfín nadando en el océano" } }`) and reseed. Seeding rejects malformed references. AI-generated games never receive images in v0.8.
+
+**Infrastructure.** One private S3 bucket (`GameMediaBucket`): all public access blocked, ACLs disabled (bucket-owner enforced), SSE-S3 encryption, TLS-only bucket policy, CORS limited to `allowedOrigins` (GET/HEAD), lifecycle expiration only on `audio-cache/`. Removal follows the `environment` context: the default `dev` uses `RemovalPolicy.DESTROY` + `autoDeleteObjects` (CDK adds its deploy-time cleanup handler, invoked only when the bucket is deleted; it is not an application Lambda), while `prod`/`production` uses `RemovalPolicy.RETAIN`. The existing Lambda receives `s3:GetObject` on `audio-cache/*` and `images/*`, `s3:PutObject` on `audio-cache/*` only, `s3:ListBucket` on that bucket (so a missing cache object is a 404 miss, not a 403), and `polly:SynthesizeSpeech` (Polly scopes this action only by lexicon ARN and no lexicons are used, so its resource is `*`). New Lambda environment: `MEDIA_BUCKET_NAME`, `POLLY_VOICE_ID`, `POLLY_ENGINE`, `POLLY_LANGUAGE_CODE`, `POLLY_OUTPUT_FORMAT` (`mp3`), `AUDIO_URL_TTL_SECONDS`, `IMAGE_URL_TTL_SECONDS`, `AUDIO_CACHE_VERSION`. Polly/S3 clients use bounded retries and request timeouts so failures return inside the Lambda timeout.
+
+**PWA.** Unchanged (ADR-014). Signed S3 URLs are cross-origin, so the Service Worker never intercepts or caches them; the audio API call is a `POST` and stays network-only.
+
+**Cost.** New usage-based charges: Polly characters synthesized (cache misses only), S3 storage and GET/PUT/HEAD requests. No always-on compute and no image-generation inference.
+
 ## Generated-game API flow
 
 Generate exactly ten questions:
@@ -222,7 +254,7 @@ curl --fail-with-body --show-error --silent \
 
 When both `gameId` and `categoryId` are present, the selected game must belong to that category. Existing seeded-game clients remain compatible by omitting `gameId`.
 
-Generation-specific responses include `400` for invalid input, `409` for an ID collision, `422` for invalid generated content after the single retry, `429` for route throttling, `502` for a provider failure, and `503` when generation is disabled. Error bodies remain application-safe.
+Generation-specific responses include `400` for invalid input, `409` for an ID collision, `422` for invalid generated content after the bounded repair rounds or an exhausted execution budget, `429` for route throttling, `502` for a provider failure, and `503` when generation is disabled. Error bodies remain application-safe.
 
 ## Persistence, seed, and cost checks
 
@@ -231,6 +263,7 @@ DynamoDB table names follow:
 ```text
 <environment>-family-learning-games-games
 <environment>-family-learning-games-game-sessions
+<environment>-family-learning-games-players
 ```
 
 Seed the standard games after the first deploy or any destroy/redeploy:
@@ -242,7 +275,7 @@ AWS_PROFILE=<aws-profile> npm run seed:games -- \
 
 Seeding restores the standard catalog only. It does not recreate AI-generated games or sessions.
 
-Generation is synchronous and user-triggered, uses at most 4096 output tokens, retries at most once only for invalid generated content, and is route-throttled at 1 request/second with burst 2. Throttling is NOT authentication or a spend quota. After an enabled test:
+Generation is synchronous and user-triggered, uses at most 4096 output tokens, repairs invalid questions in at most 5 bounded rounds within the execution budget (v0.7.1), and is route-throttled at 1 request/second with burst 2. Throttling is NOT authentication or a spend quota. After an enabled test:
 
 - inspect Bedrock usage/costs for the configured region and model;
 - inspect Lambda/API logs for status, duration, and throttling;
@@ -274,10 +307,12 @@ npx cdk destroy FamilyLearningGamesBackendStack --profile <aws-profile> \
   -c deploymentRegion=<region>
 ```
 
-The development tables use `RemovalPolicy.DESTROY`. Destroying the stack permanently deletes seeded/generated games, sessions, the API, Lambda, Guardrail, and managed logs; CDK bootstrap resources remain. A later deployment requires reseeding.
+The development tables use `RemovalPolicy.DESTROY`. Destroying the stack permanently deletes seeded/generated games, sessions, the API, Lambda, Guardrail, and managed logs; CDK bootstrap resources remain. A later deployment requires reseeding. In the default `dev` environment the v0.8 media bucket is emptied and deleted too (curated images included — keep the originals outside S3 and re-upload them after a clean deploy). With `-c environment=prod` the bucket is retained and must be removed manually if no longer wanted.
 
 ## Scope
 
 v0.4 does not add authentication, API keys, usage plans, family profiles, generated media, queues, multiplayer, or a production multi-environment platform. Route throttling is basic protection, not an identity boundary.
+
+v0.8 adds only on-demand Polly question audio and controlled curated images in one private S3 bucket. It does not add AI image generation, uploads, external image URLs, speech recognition, SSML, streaming audio, queues/workflows, a CDN, a second Lambda/API, or a new DynamoDB table.
 
 v0.5 adds only public hosting for the existing frontend. It does not add authentication/Cognito, family profiles (FASE 6), PWA features (FASE 7), audio/image generation (FASE 8), multiplayer/WebSockets (FASE 9), new game types (FASE 10), a custom purchased domain, or a CI/CD pipeline beyond Amplify's own GitHub build/deploy. The backend Lambda, its routes, DynamoDB tables, and the Bedrock integration are unchanged in contract.

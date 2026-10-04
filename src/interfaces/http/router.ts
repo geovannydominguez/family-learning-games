@@ -2,6 +2,8 @@ import { ApplicationError, PersistenceError } from "../../application/errors.ts"
 import type { GenerateGameService } from "../../application/game/generateGameService.ts";
 import type { GameSessionService } from "../../application/game/gameSessionService.ts";
 import type { PublicGame } from "../../application/game/gameSessionContracts.ts";
+import type { QuestionImageResolver } from "../../application/media/questionImages.ts";
+import type { QuestionSpeechService } from "../../application/media/questionSpeech.ts";
 import type { PlayerService } from "../../application/player/playerService.ts";
 import type { Difficulty, Game } from "../../domain/game/types.ts";
 import type { GameRepository } from "../../repositories/game/GameRepository.ts";
@@ -12,6 +14,9 @@ interface RouterDependencies {
   sessionService: GameSessionService;
   playerService: PlayerService;
   generationService?: GenerateGameService;
+  /** v0.8 media (ADR-016/017). Absent when no media bucket is configured. */
+  speechService?: QuestionSpeechService;
+  imageResolver?: QuestionImageResolver;
   log?: (record: RequestLog) => void;
   now?: () => number;
 }
@@ -24,6 +29,8 @@ export function createHttpRouter({
   sessionService,
   playerService,
   generationService,
+  speechService,
+  imageResolver,
   log = (record) => console.log(JSON.stringify(record)),
   now = Date.now,
 }: RouterDependencies) {
@@ -32,7 +39,7 @@ export function createHttpRouter({
     let response: HttpResponse;
     let caughtError: unknown;
     try {
-      response = await route(request, games, sessionService, playerService, generationService);
+      response = await route(request, games, sessionService, playerService, generationService, speechService, imageResolver);
     } catch (error) {
       caughtError = error;
       response = mapError(error);
@@ -85,6 +92,8 @@ function readRouteContext(request: HttpRequest): { operation: string; resourceId
   if (request.method === "POST" && request.path === "/games/generate") return { operation: "generate-game" };
   if (request.method === "GET" && request.path === "/players") return { operation: "list-players" };
   if (request.method === "POST" && request.path === "/players") return { operation: "create-player" };
+  const audio = request.path.match(questionAudioPath);
+  if (request.method === "POST" && audio) return withResource("get-question-audio", audio[1]);
   const game = request.path.match(/^\/games\/([^/]+)$/);
   if (request.method === "GET" && game) return withResource("get-game", game[1]);
   const answer = request.path.match(/^\/game-sessions\/([^/]+)\/answers$/);
@@ -112,10 +121,12 @@ async function route(
   sessionService: GameSessionService,
   playerService: PlayerService,
   generationService: GenerateGameService | undefined,
+  speechService: QuestionSpeechService | undefined,
+  imageResolver: QuestionImageResolver | undefined,
 ): Promise<HttpResponse> {
   if (request.method === "GET" && request.path === "/games") {
     const catalog = await games.findAll();
-    return json(200, catalog.map(toPublicGame));
+    return json(200, await Promise.all(catalog.map((game) => toPublicGame(game, imageResolver))));
   }
   if (request.method === "POST" && request.path === "/games/generate") {
     if (!generationService) {
@@ -130,13 +141,23 @@ async function route(
       correlationId: request.requestId,
       ...(request.remainingTimeMs ? { remainingTimeMs: request.remainingTimeMs } : {}),
     });
-    return json(201, toPublicGame(game));
+    return json(201, await toPublicGame(game, imageResolver));
+  }
+  const audioRoute = request.path.match(questionAudioPath);
+  if (request.method === "POST" && audioRoute) {
+    // ADR-017: identifiers only. Any body field (text, ssml, voiceId, …) is rejected
+    // so the endpoint can never become a general-purpose TTS proxy.
+    assertEmptyBody(request.body);
+    const gameId = readPathId(audioRoute[1]);
+    const questionId = readPathId(audioRoute[2]);
+    if (!speechService) throw new ApplicationError("QUESTION_AUDIO_DISABLED", "Question audio is not available.");
+    return json(200, await speechService.getQuestionAudio({ gameId, questionId, correlationId: request.requestId }));
   }
   const gameRoute = request.path.match(/^\/games\/([^/]+)$/);
   if (request.method === "GET" && gameRoute) {
     const game = await games.findById(decodeURIComponent(gameRoute[1]));
     if (!game) throw new ApplicationError("RESOURCE_NOT_FOUND", "Game was not found.");
-    return json(200, toPublicGame(game));
+    return json(200, await toPublicGame(game, imageResolver));
   }
   if (request.method === "GET" && request.path === "/game-setup") {
     const [players, categories] = await Promise.all([games.getPlayers(), games.getCategories()]);
@@ -182,23 +203,53 @@ async function route(
   return json(404, { error: { code: "RESOURCE_NOT_FOUND", message: "Route was not found." } });
 }
 
-function toPublicGame(game: Game): PublicGame {
+async function toPublicGame(game: Game, imageResolver: QuestionImageResolver | undefined): Promise<PublicGame> {
+  const images = await Promise.all(game.questions.map((question) =>
+    imageResolver && question.media?.image ? imageResolver.resolve(question.media.image) : undefined));
   return {
     id: game.id,
     title: game.title,
     category: game.category,
     difficulties: difficulties.filter((difficulty) => game.questions.some((question) => question.difficulty === difficulty)),
     ...(game.generationMetadata ? { generationMetadata: game.generationMetadata } : {}),
-    questions: game.questions.map((question) => ({
+    questions: game.questions.map((question, index) => ({
       id: question.id,
       categoryId: question.categoryId,
       difficulty: question.difficulty,
       text: question.text,
       emoji: question.emoji,
       image: question.image,
+      ...(images[index] ? { media: { image: images[index] } } : {}),
       answers: question.answers.map(({ id, text }) => ({ id, text })),
     })),
   };
+}
+
+const questionAudioPath = /^\/games\/([^/]+)\/questions\/([^/]+)\/audio$/;
+const pathIdPattern = /^[A-Za-z0-9._~-]{1,128}$/;
+
+function readPathId(encoded: string): string {
+  let value: string;
+  try {
+    value = decodeURIComponent(encoded);
+  } catch {
+    throw new ApplicationError("INVALID_REQUEST", "Game or question identifier is invalid.");
+  }
+  if (!pathIdPattern.test(value)) throw new ApplicationError("INVALID_REQUEST", "Game or question identifier is invalid.");
+  return value;
+}
+
+function assertEmptyBody(body: string | null | undefined): void {
+  if (body === undefined || body === null || body.trim() === "") return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    throw new ApplicationError("INVALID_REQUEST", "Request body must be valid JSON.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.keys(parsed).length > 0) {
+    throw new ApplicationError("INVALID_REQUEST", "Question audio requests do not accept parameters.");
+  }
 }
 
 function parseGenerationObject(body: string | null | undefined): Record<string, unknown> {
@@ -256,6 +307,7 @@ function applicationErrorStatus(code: ApplicationError["code"]): number {
     // detail (guardrail id/version, policy, filter type) stays in observability
     // only; the envelope carries just the code and a generic message.
     case "AI_GENERATION_BLOCKED":
+    case "QUESTION_AUDIO_UNSUPPORTED":
       return 422;
     case "INVALID_SESSION_STATE":
     case "SESSION_CONFLICT":
@@ -263,8 +315,10 @@ function applicationErrorStatus(code: ApplicationError["code"]): number {
     case "PLAYER_CONFLICT":
       return 409;
     case "AI_GENERATION_FAILED":
+    case "QUESTION_AUDIO_FAILED":
       return 502;
     case "AI_GENERATION_DISABLED":
+    case "QUESTION_AUDIO_DISABLED":
       return 503;
     case "PLAYER_NOT_FOUND":
     default:

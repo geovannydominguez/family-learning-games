@@ -89,3 +89,14 @@ test("isObsoleteOwnedCache never flags caches it does not own", () => {
   assert.equal(isObsoleteOwnedCache("workbox-precache-v2", STATIC_CACHE_NAME), false);
   assert.equal(isObsoleteOwnedCache("some-other-extension-cache", STATIC_CACHE_NAME), false);
 });
+
+test("v0.8: signed private media URLs (audio/images) and the audio API are never cacheable", () => {
+  const origin = "https://play.joamgames.com";
+  const signedAudio = "https://media.s3.us-east-1.amazonaws.com/audio-cache/v1/abc.mp3?X-Amz-Expires=900&X-Amz-Signature=x";
+  const signedImage = "https://media.s3.us-east-1.amazonaws.com/images/animals/dolphin-01.webp?X-Amz-Signature=x";
+  for (const url of [signedAudio, signedImage]) {
+    assert.equal(isBackendApiRequest(url, origin), true);
+    assert.equal(isCacheableGetRequest("GET", url, origin), false);
+  }
+  assert.equal(isCacheableGetRequest("POST", "https://api.example.com/games/animals/questions/q1/audio", origin), false);
+});

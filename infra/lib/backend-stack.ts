@@ -11,10 +11,16 @@ import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { AttributeType, BillingMode, Table } from "aws-cdk-lib/aws-dynamodb";
 import { Effect, PolicyStatement } from "aws-cdk-lib/aws-iam";
+import { BlockPublicAccess, Bucket, BucketEncryption, HttpMethods, ObjectOwnership } from "aws-cdk-lib/aws-s3";
 import type { Construct } from "constructs";
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const defaultBedrockModelId = "global.anthropic.claude-sonnet-4-6";
+// v0.8 — ADR-017: one fixed speech profile (Spanish, es-US). Not configurable per deploy.
+const pollyVoiceId = "Lupe";
+const pollyEngine = "neural";
+const pollyLanguageCode = "es-US";
+const defaultAudioCacheExpirationDays = 30;
 
 export interface FamilyLearningGamesBackendStackProps extends StackProps {
   aiGameGenerationEnabled?: boolean;
@@ -76,6 +82,36 @@ export class FamilyLearningGamesBackendStack extends Stack {
       billingMode: BillingMode.PAY_PER_REQUEST,
       removalPolicy: RemovalPolicy.DESTROY,
     });
+    // v0.8 — ADR-016: one private media bucket. Development stacks (the default
+    // `environment=dev`) are destroyed and redeployed cleanly like the tables, so
+    // the bucket and its objects are deleted with the stack. `autoDeleteObjects`
+    // adds CDK's deploy-time cleanup handler (not an application Lambda). A
+    // production environment (`-c environment=prod`) retains the bucket.
+    const retainMedia = environment === "prod" || environment === "production";
+    const mediaBucket = new Bucket(this, "GameMediaBucket", {
+      blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
+      objectOwnership: ObjectOwnership.BUCKET_OWNER_ENFORCED,
+      encryption: BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      versioned: false,
+      removalPolicy: retainMedia ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY,
+      autoDeleteObjects: !retainMedia,
+      lifecycleRules: [{
+        id: "expire-derived-audio-cache",
+        prefix: "audio-cache/",
+        expiration: Duration.days(readPositiveNumber(
+          this.node.tryGetContext("audioCacheExpirationDays") ?? defaultAudioCacheExpirationDays,
+          "audioCacheExpirationDays",
+          true,
+        )),
+      }],
+      cors: [{
+        allowedOrigins,
+        allowedMethods: [HttpMethods.GET, HttpMethods.HEAD],
+        allowedHeaders: [],
+        maxAge: 3_600,
+      }],
+    });
     const logGroup = new LogGroup(this, "BackendLogs", {
       logGroupName: "/aws/lambda/family-learning-games-backend",
       retention: RetentionDays.ONE_WEEK,
@@ -86,6 +122,14 @@ export class FamilyLearningGamesBackendStack extends Stack {
       GAME_SESSIONS_TABLE_NAME: gameSessionsTable.tableName,
       PLAYERS_TABLE_NAME: playersTable.tableName,
       AI_GAME_GENERATION_ENABLED: String(aiGameGenerationEnabled),
+      MEDIA_BUCKET_NAME: mediaBucket.bucketName,
+      POLLY_VOICE_ID: pollyVoiceId,
+      POLLY_ENGINE: pollyEngine,
+      POLLY_LANGUAGE_CODE: pollyLanguageCode,
+      POLLY_OUTPUT_FORMAT: "mp3",
+      AUDIO_URL_TTL_SECONDS: "900",
+      IMAGE_URL_TTL_SECONDS: "900",
+      AUDIO_CACHE_VERSION: readStringContext(this.node.tryGetContext("audioCacheVersion"), "v1"),
     };
     let guardrail: CfnGuardrail | undefined;
 
@@ -146,6 +190,31 @@ export class FamilyLearningGamesBackendStack extends Stack {
       actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Scan"],
       resources: [playersTable.tableArn],
     }));
+    // v0.8 media (least privilege): read curated images and cached audio, write
+    // only the derived audio cache. ListBucket on this one bucket only lets a
+    // missing cache object answer 404 (cache miss) instead of 403.
+    backend.addToRolePolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:GetObject"],
+      resources: [mediaBucket.arnForObjects("audio-cache/*"), mediaBucket.arnForObjects("images/*")],
+    }));
+    backend.addToRolePolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:PutObject"],
+      resources: [mediaBucket.arnForObjects("audio-cache/*")],
+    }));
+    backend.addToRolePolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["s3:ListBucket"],
+      resources: [mediaBucket.bucketArn],
+    }));
+    // Polly's SynthesizeSpeech only supports resource-level scoping for
+    // lexicons; none are used, so the single action is granted on "*".
+    backend.addToRolePolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["polly:SynthesizeSpeech"],
+      resources: ["*"],
+    }));
     if (guardrail) {
       backend.addToRolePolicy(new PolicyStatement({
         effect: Effect.ALLOW,
@@ -177,6 +246,8 @@ export class FamilyLearningGamesBackendStack extends Stack {
     api.addRoutes({ path: "/games", methods: [HttpMethod.GET], integration });
     api.addRoutes({ path: "/games/{gameId}", methods: [HttpMethod.GET], integration });
     const [generationRoute] = api.addRoutes({ path: "/games/generate", methods: [HttpMethod.POST], integration });
+    // v0.8 — ADR-017: on-demand question audio. Same HTTP API, same Lambda.
+    api.addRoutes({ path: "/games/{gameId}/questions/{questionId}/audio", methods: [HttpMethod.POST], integration });
     api.addRoutes({ path: "/game-sessions", methods: [HttpMethod.POST], integration });
     api.addRoutes({ path: "/game-sessions/{sessionId}/answers", methods: [HttpMethod.POST], integration });
     api.addRoutes({ path: "/game-sessions/{sessionId}", methods: [HttpMethod.GET], integration });
@@ -200,6 +271,7 @@ export class FamilyLearningGamesBackendStack extends Stack {
     new CfnOutput(this, "GamesTableName", { value: gamesTable.tableName });
     new CfnOutput(this, "GameSessionsTableName", { value: gameSessionsTable.tableName });
     new CfnOutput(this, "PlayersTableName", { value: playersTable.tableName });
+    new CfnOutput(this, "MediaBucketName", { value: mediaBucket.bucketName });
   }
 }
 

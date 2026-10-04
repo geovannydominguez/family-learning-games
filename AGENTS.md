@@ -1,24 +1,27 @@
 # Family Learning Games — AGENTS.md
 
 ## Current target
-> **v0.7.1 — AI generation quality and operational hardening**
+> **v0.8 — Audio / images**
 
 ## Current roadmap phase
-> **FASE 7 — PWA** (completed)
+> **FASE 8 — Audio / imágenes**
 >
-> **v0.7.1** is a patch over the completed Phase 7 baseline, not a new phase.
+> Builds incrementally on the v0.7.1 baseline (FASE 7 — PWA, completed, plus the v0.7.1 AI quality patch).
 
 ## Mandatory documentation
-Before modifying v0.7.1 code, read:
+Before modifying v0.8 code, read:
 
 1. `AGENTS.md`
-2. `docs/architecture/ARCHITECTURE-v0.7.1.md`
-3. `docs/architecture/ADR-015-claude-sonnet-ai-generation-quality.md`
-4. `docs/architecture/REQUIREMENTS-v0.7.1.md`
-5. `docs/architecture/ARCHITECTURE-v0.7.md`
-6. `docs/architecture/ADR-014-pwa-online-first.md`
-7. `docs/architecture/REQUIREMENTS-v0.7.md`
-8. ADR-011, ADR-012 and ADR-013 when touching AI generation, players, or AI personalization.
+2. `docs/architecture/ARCHITECTURE-V0.8.md`
+3. `docs/architecture/REQUIREMENTS-V0.8.md`
+4. `docs/architecture/ADR-016-game-media-assets-private-s3.md`
+5. `docs/architecture/ADR-017-amazon-polly-question-audio.md`
+6. `docs/architecture/ARCHITECTURE-v0.7.1.md`
+7. `docs/architecture/REQUIREMENTS-v0.7.1.md`
+8. `docs/architecture/ADR-015-claude-sonnet-ai-generation-quality.md`
+9. `docs/architecture/ADR-014-pwa-online-first.md`
+10. `docs/architecture/ARCHITECTURE-v0.7.md` and `docs/architecture/REQUIREMENTS-v0.7.md`
+11. ADR-009, ADR-011, ADR-012 and ADR-013 when touching AI generation, game identity, players, or AI personalization.
 
 Previous accepted architecture/ADRs remain relevant unless superseded. In particular:
 
@@ -29,6 +32,8 @@ Previous accepted architecture/ADRs remain relevant unless superseded. In partic
 - `ADR-013.md` decides age-aware AI personalization derived from player profiles.
 - `ADR-014-pwa-online-first.md` decides the online-first PWA with controlled static caching.
 - `ADR-015-claude-sonnet-ai-generation-quality.md` evolves the ADR-011 AI pipeline implementation for v0.7.1: Claude Sonnet 4.6, stronger difficulty/diversity requirements, answer-order verification, bounded observability, and synchronous execution-budget awareness.
+- `ADR-016-game-media-assets-private-s3.md` decides one private S3 media bucket (`images/`, `audio-cache/`), logical image references in the Domain, and short-lived signed read URLs.
+- `ADR-017-amazon-polly-question-audio.md` decides on-demand Amazon Polly question audio behind a `SpeechSynthesizer` port, derived server-side from persisted games, cached in S3.
 
 ## Architecture
 
@@ -51,6 +56,9 @@ AWS Lambda
    ↓
 Application
    ├── GameGenerator / GameValidator ──► Bedrock adapters ──► Amazon Bedrock
+   ├── QuestionSpeechService ──► SpeechSynthesizer port ──► PollySpeechSynthesizer ──► Amazon Polly
+   │                         └─► MediaObjectStore port ──► S3MediaObjectStore ──► private S3 (audio-cache/)
+   ├── QuestionImageResolver (controlled catalog) ──► MediaObjectStore ──► private S3 (images/)
    └── Repository ports (Game, GameSession, Player) ──► DynamoDB repositories ──► DynamoDB
    ↓
 Domain (game, player)
@@ -84,6 +92,20 @@ When a generation request carries `playerId`, Application resolves the player th
 
 ### PWA is presentation-only and online-first
 The manifest, icons, Service Worker, and offline fallback belong exclusively to the frontend/browser layer. The Service Worker must not contain game, player, AI, or session rules, must never cache backend/API responses as application state, and must only delete caches it owns (`joam-static-*`). DynamoDB remains the only source of truth. Offline fallback is supported; offline gameplay is not. ADR-014 remains authoritative and unchanged: v0.7.1 must preserve the installable online-first PWA behavior and must not introduce offline gameplay or API/AI response caching.
+
+### Media is optional, controlled, and private (v0.8)
+- Audio is synthesized **on demand** only by `POST /games/{gameId}/questions/{questionId}/audio`. The endpoint accepts identifiers only (any body field such as `text`, `ssml`, `voiceId` is rejected); the backend builds plain text from the persisted question and its options in displayed order. Speech never includes `isCorrect`, IDs, player data, or SSML.
+- Audio is never synthesized during game generation or session flows, and never consumes or alters the v0.7.1 Generator/Validator execution budget.
+- Audio cache keys are opaque (`audio-cache/<version>/<sha256>.mp3`) and change with text, language, voice profile or `AUDIO_CACHE_VERSION`.
+- Domain stores only `Question.media.image = { assetId, altText }`. Never persist S3 URLs, bucket names, object keys, or signed URLs. Public question DTOs expose it additively as `media: { image: { url, altText } }` with a short-lived signed URL. The legacy public `image?: string` field (since v0.2) keeps its type and pass-through behavior; never reuse or retype it.
+- Images come only from the controlled catalog (`src/data/mediaCatalog.json`). No AI image generation, external URLs, uploads, or family photos. The AI Generator must not produce media. A missing/failed image degrades to text-only.
+- The media bucket stays private (block public access, ACLs disabled, encryption, TLS-only). Never make it public or add a website/CDN in front of it.
+- Media failures must never block answering, advancing, or completing a game.
+- Polly and S3 SDKs live only in Infrastructure (`src/infrastructure/media/`).
+- Speech uses one fixed profile in v0.8: `Lupe` / `neural` / `es-US` / `mp3` (`Opción N` labels). Do not add i18n, language selection or voice mapping.
+- The audio endpoint reuses the existing HTTP contract (endpoint-specific success body, `{ "error": { code, message } }` errors); never add a second envelope.
+- The media bucket uses `DESTROY` + `autoDeleteObjects` in the default `dev` environment and `RETAIN` for `environment=prod|production`. The CDK auto-delete handler is a deploy-time helper, not an application Lambda.
+- Concurrent cache-miss double synthesis is an accepted limitation; do not add locks, queues or idempotency tables for it.
 
 ## Identity rule
 `gameId = categoryId` is no longer a domain invariant. Existing seeded IDs remain valid. Generated games use unique IDs created by Application through an injected ID factory.
@@ -142,6 +164,14 @@ BEDROCK_VALIDATOR_MODEL_ID   # global.anthropic.claude-sonnet-4-6
 BEDROCK_REGION
 BEDROCK_GUARDRAIL_ID
 BEDROCK_GUARDRAIL_VERSION
+MEDIA_BUCKET_NAME            # v0.8, set by CDK; media is disabled when absent
+POLLY_VOICE_ID               # fixed: Lupe   (v0.8 single speech profile, set by CDK)
+POLLY_ENGINE                 # fixed: neural
+POLLY_LANGUAGE_CODE          # fixed: es-US
+POLLY_OUTPUT_FORMAT          # fixed: mp3
+AUDIO_URL_TTL_SECONDS        # default 900
+IMAGE_URL_TTL_SECONDS        # default 900
+AUDIO_CACHE_VERSION          # default v1
 NEXT_PUBLIC_GAME_API_BASE_URL
 ```
 
@@ -150,7 +180,7 @@ AI generation defaults to disabled. Bedrock generator/validator models, region, 
 `ADR-011` continues to define the independent Generator/Validator pipeline and deterministic Application validation. `ADR-015` defines the v0.7.1 model/configuration and quality evolution.
 
 ## Persistence
-Use the existing `Games`, `GameSessions`, and `Players` tables (`Players`: PK = `playerId`, no secondary indexes). Do not introduce RDS, Aurora, S3-as-database, Redis, or ElastiCache. The Service Worker cache and browser storage are not application persistence.
+Use the existing `Games`, `GameSessions`, and `Players` tables (`Players`: PK = `playerId`, no secondary indexes). Do not introduce RDS, Aurora, S3-as-database, Redis, or ElastiCache. The Service Worker cache and browser storage are not application persistence. The v0.8 media bucket stores binary media only (curated images and derived audio cache), never game/session/player state; do not add a media DynamoDB table.
 
 ## Allowed in the v0.7 baseline
 - AWS Amplify Hosting for the Next.js frontend, with the existing `play.joamgames.com` custom domain
@@ -164,11 +194,18 @@ Use the existing `Games`, `GameSessions`, and `Players` tables (`Players`: PK = 
 - tests for CORS configuration, CDK behavior, player rules, PWA cache classification/registration, and frontend configuration
 - small, coherent refactors strictly needed to support the above
 
+## Allowed in v0.8
+- one private S3 media bucket, Polly `SynthesizeSpeech`, and scoped S3 permissions for the existing Lambda
+- `POST /games/{gameId}/questions/{questionId}/audio` on the existing HTTP API
+- optional `media.image` logical references and the controlled image catalog
+- the frontend Listen button and optional question image
+- tests for speech content, cache behavior, safe errors, media DTOs, CDK bucket/IAM, and the audio UI controller
+
 ## Out of scope
 Do not add:
 - Cognito/auth, user registration, login, password recovery, JWT, user/family accounts, roles/permissions, per-player authorization
 - offline gameplay, offline session persistence, IndexedDB synchronization, Background Sync, push notifications/Web Push, cached API or Bedrock responses, native app packaging/store publication
-- Polly, S3 media, image/voice generation (FASE 8)
+- AI image generation, Bedrock image models, external image URLs, web image search, user/family photo uploads, avatars, camera/microphone, speech recognition, voice commands/cloning, model- or user-authored SSML, streaming audio, media CDN/CloudFront, SQS/Step Functions/EventBridge, offline caching of dynamic/private media
 - WebSockets, AppSync subscriptions, multiplayer/real-time state (FASE 9)
 - new game types (FASE 10)
 - additional custom domains beyond `play.joamgames.com`
@@ -188,6 +225,7 @@ POST /game-sessions
 GET  /game-sessions/{sessionId}
 POST /game-sessions/{sessionId}/answers
 POST /games/generate
+POST /games/{gameId}/questions/{questionId}/audio
 GET    /players
 POST   /players
 PUT    /players/{playerId}
@@ -208,10 +246,10 @@ private API keys / secrets
 
 Every `NEXT_PUBLIC_*` value must be assumed publicly visible from the browser. Only the public API base URL is appropriate there.
 
-Player identity (`playerId`, name) must never be sent to Bedrock. Service Worker caches must never store player data, game sessions, generated games, gameplay state, or AI results.
+Player identity (`playerId`, name) must never be sent to Bedrock or Polly. Signed media URLs, MP3 bytes, and object keys must never be logged. Service Worker caches must never store player data, game sessions, generated games, gameplay state, or AI results.
 
 ## Cost awareness
-Prefer serverless, managed, pay-per-use resources. Amplify Hosting, Route 53 (hosted zone/domain for `play.joamgames.com`), API Gateway, Lambda, DynamoDB on-demand, and Bedrock remain the only billable services introduced across v0.1–v0.7. Document any new potentially billable resource. Do not destroy or recreate existing stacks/tables.
+Prefer serverless, managed, pay-per-use resources. Amplify Hosting, Route 53 (hosted zone/domain for `play.joamgames.com`), API Gateway, Lambda, DynamoDB on-demand, and Bedrock were the billable services introduced across v0.1–v0.7; v0.8 adds Amazon Polly (characters synthesized on cache miss) and one S3 bucket (storage + requests). Document any new potentially billable resource. Do not destroy or recreate existing stacks/tables.
 
 ## Testing
 Normal tests must not require live AWS/Amplify. Test CORS/allowed-origins parsing and CDK configuration, default-disabled behavior, route preservation, player validation and AI data minimization, PWA cache classification and Service Worker registration, and frontend configuration. PWA lifecycle behavior must be validated against a production build (`npm run build` + `npm run start`), not only `npm run dev`. Do not add tests solely to raise coverage.
@@ -313,7 +351,15 @@ git diff --check
 ```
 
 ## Definition of Done
-v0.7 (current baseline) is complete when:
+v0.8 is complete when (in addition to the v0.7 criteria below):
+- a question and its options can be listened to on demand, with the text derived from the persisted game and never from the client
+- repeated requests reuse cached audio from the private bucket without calling Polly again
+- optional controlled images render with alt text; questions without images are unchanged
+- media failures never block gameplay; `isCorrect` is never exposed
+- no second Lambda/API, no new DynamoDB table, no AI image generation, and the v0.7.1 AI pipeline is unchanged
+- the PWA remains online-first and validation commands pass
+
+v0.7 (baseline) is complete when:
 - the app loads normally at `https://play.joamgames.com`, deployed from GitHub through AWS Amplify Hosting
 - the Web App Manifest is valid and the app is installable (desktop and mobile) as JOAM Games with its icons
 - a Service Worker installs and activates, caches only static resources, and removes obsolete `joam-static-*` caches on activation

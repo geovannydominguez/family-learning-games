@@ -20,6 +20,20 @@ export interface Answer {
   isCorrect: boolean;
 }
 
+/**
+ * Logical reference to an application-controlled (curated) image (v0.8,
+ * ADR-016). `assetId` is a provider-independent identifier — never an S3 URL,
+ * bucket name, object key or signed URL.
+ */
+export interface QuestionImage {
+  assetId: string;
+  altText: string;
+}
+
+export interface QuestionMedia {
+  image?: QuestionImage;
+}
+
 export interface Question {
   id: string;
   categoryId: string;
@@ -27,7 +41,14 @@ export interface Question {
   text: string;
   answers: Answer[];
   emoji?: string;
+  /**
+   * Legacy free-form reference (v0.1+), still passed through unchanged in the
+   * public `image` field for backward compatibility. It is not a controlled
+   * asset (ADR-016); v0.8 images use `media.image`.
+   */
   image?: string;
+  /** Optional controlled media (v0.8). Questions without it remain fully valid. */
+  media?: QuestionMedia;
 }
 
 export interface PlayerAnswer {

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { Difficulty, GameSession, Player as LegacyGamePlayer } from "../../domain/game/types.ts";
 import type { GameRepository } from "../../repositories/game/GameRepository.ts";
 import { ApplicationError } from "../errors.ts";
+import type { PublicQuestionImage, QuestionImageResolver } from "../media/questionImages.ts";
 import type { PlayerRepository } from "../player/PlayerRepository.ts";
 import type { GameSessionRepository } from "./GameSessionRepository.ts";
 import { advanceSession, createGameSession, submitAnswer } from "./gameSession.ts";
@@ -28,6 +29,7 @@ export class GameSessionService {
   private readonly players: PlayerRepository;
   private readonly createId: () => string;
   private readonly random: () => number;
+  private readonly imageResolver: QuestionImageResolver | undefined;
 
   constructor(
     games: GameRepository,
@@ -35,12 +37,14 @@ export class GameSessionService {
     players: PlayerRepository,
     createId: () => string = randomUUID,
     random: () => number = Math.random,
+    imageResolver?: QuestionImageResolver,
   ) {
     this.games = games;
     this.sessions = sessions;
     this.players = players;
     this.createId = createId;
     this.random = random;
+    this.imageResolver = imageResolver;
   }
 
   async start(command: StartGameSessionCommand): Promise<PublicGameSession> {
@@ -88,7 +92,7 @@ export class GameSessionService {
     }
     const id = this.createId();
     await this.sessions.create(id, session);
-    return toPublicSession(id, session);
+    return this.toPublic(id, session);
   }
 
   async answer(sessionId: string, answerId: string): Promise<SubmitAnswerResponse> {
@@ -114,21 +118,29 @@ export class GameSessionService {
         correctAnswerText: correctAnswer.text,
         isCorrect: answer.isCorrect,
       },
-      nextSession: toPublicSession(sessionId, nextSession),
+      nextSession: await this.toPublic(sessionId, nextSession),
     };
   }
 
   async get(sessionId: string): Promise<PublicGameSession> {
     const session = await this.sessions.findById(sessionId);
     if (!session) throw new ApplicationError("SESSION_NOT_FOUND", "Game session was not found or has expired.");
-    return toPublicSession(sessionId, session);
+    return this.toPublic(sessionId, session);
+  }
+
+  /** Resolves the current question's optional controlled image (v0.8); failures degrade to no image. */
+  private async toPublic(id: string, session: GameSession): Promise<PublicGameSession> {
+    const question = session.status === "playing" ? session.questions[session.currentQuestionIndex] : undefined;
+    const image = this.imageResolver ? await this.imageResolver.resolve(question?.media?.image) : undefined;
+    return toPublicSession(id, session, image);
   }
 }
 
-export function toPublicSession(id: string, session: GameSession): PublicGameSession {
+export function toPublicSession(id: string, session: GameSession, image?: PublicQuestionImage): PublicGameSession {
   const question = session.status === "playing" ? session.questions[session.currentQuestionIndex] : undefined;
   return {
     id,
+    gameId: session.gameId,
     player: session.player,
     ...(session.playerId ? { playerId: session.playerId } : {}),
     category: session.category,
@@ -143,6 +155,7 @@ export function toPublicSession(id: string, session: GameSession): PublicGameSes
           text: question.text,
           emoji: question.emoji,
           image: question.image,
+          ...(image ? { media: { image } } : {}),
           answers: question.answers.map(({ id: answerId, text }) => ({ id: answerId, text })),
         }
       : null,

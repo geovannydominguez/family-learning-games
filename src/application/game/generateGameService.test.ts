@@ -2236,3 +2236,15 @@ test("remainingTimeMs never crosses the AI boundary", async () => {
   assert.deepEqual(Object.keys(generator.calls[0]).sort(), ["difficulty", "questionCount", "targetAge", "topic"]);
   assert.deepEqual(Object.keys(validator.calls[0]).sort(), ["difficulty", "draft", "targetAge", "topic"]);
 });
+
+test("v0.8: model-emitted media is never persisted — generated games stay text-only (FR-0814/FR-0854)", async () => {
+  const repository = new StubGameRepository();
+  const game = await createService(generatorFrom(() => {
+    const draft = makeDraft();
+    (draft.questions[0] as { media?: unknown }).media = { image: { assetId: "animals/dolphin-01", altText: "x" } };
+    return draft;
+  }), repository).generate({ topic: "dinosaurs", difficulty: "easy", questionCount: 10, playerId: "amelia" });
+
+  assert.equal(game.questions.some((question) => "media" in question), false);
+  assert.equal(repository.created[0].questions.some((question) => "media" in question), false);
+});

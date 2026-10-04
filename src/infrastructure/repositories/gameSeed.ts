@@ -1,4 +1,5 @@
 import type { Category, Game, Player, Question } from "../../domain/game/types.ts";
+import { isValidQuestionImage } from "../../domain/game/questionMedia.ts";
 
 export interface GameSeedSource {
   players: Player[];
@@ -22,6 +23,12 @@ export interface GameRecord {
 const initialTimestamp = "2026-09-01T00:00:00.000Z";
 
 export function buildGameSeedRecords(source: GameSeedSource): GameRecord[] {
+  // v0.8 (ADR-016): only logical, well-formed image references may be persisted.
+  for (const question of source.questions) {
+    if (question.media?.image !== undefined && !isValidQuestionImage(question.media.image)) {
+      throw new Error(`Question ${question.id} has invalid image metadata.`);
+    }
+  }
   return source.categories.map((category, sortOrder) => gameDomainToRecord({
     id: category.id,
     title: category.name,

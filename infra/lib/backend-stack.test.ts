@@ -5,12 +5,28 @@ import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { FamilyLearningGamesBackendStack } from "./backend-stack.ts";
 
-test("defines the default-disabled Lambda, eleven-route HTTP API, durable tables and least-privilege access", () => {
+const autoDeleteHandlerPrefix = "CustomS3AutoDeleteObjectsCustomResourceProviderHandler";
+
+/**
+ * Exactly one application Lambda (the backend). The only other function allowed
+ * is CDK's deploy-time S3 auto-delete handler, present only in non-production
+ * environments (v0.8 media bucket cleanup on `cdk destroy`), never on the request path.
+ */
+function assertSingleApplicationLambda(template: Template, expectAutoDeleteHandler = true): void {
+  const functions = Object.entries(template.findResources("AWS::Lambda::Function"));
+  const application = functions.filter(([logicalId]) => !logicalId.startsWith(autoDeleteHandlerPrefix));
+  const helpers = functions.filter(([logicalId]) => logicalId.startsWith(autoDeleteHandlerPrefix));
+  assert.equal(application.length, 1);
+  assert.equal(application[0][1].Properties.FunctionName, "family-learning-games-backend");
+  assert.equal(helpers.length, expectAutoDeleteHandler ? 1 : 0);
+}
+
+test("defines the default-disabled Lambda, twelve-route HTTP API, durable tables and least-privilege access", () => {
   const app = new App({ context: { frontendOrigin: "https://family.example.com" } });
   const template = Template.fromStack(new FamilyLearningGamesBackendStack(app, "TestStack"));
-  template.resourceCountIs("AWS::Lambda::Function", 1);
+  assertSingleApplicationLambda(template);
   template.resourceCountIs("AWS::ApiGatewayV2::Api", 1);
-  template.resourceCountIs("AWS::ApiGatewayV2::Route", 11);
+  template.resourceCountIs("AWS::ApiGatewayV2::Route", 12);
   template.resourceCountIs("AWS::DynamoDB::Table", 3);
   template.resourceCountIs("AWS::Logs::LogGroup", 1);
   template.hasResourceProperties("AWS::Lambda::Function", { Runtime: "nodejs22.x", Timeout: 10 });
@@ -37,6 +53,7 @@ test("defines the default-disabled Lambda, eleven-route HTTP API, durable tables
   template.hasResourceProperties("AWS::ApiGatewayV2::Route", { RouteKey: "POST /players" });
   template.hasResourceProperties("AWS::ApiGatewayV2::Route", { RouteKey: "PUT /players/{playerId}" });
   template.hasResourceProperties("AWS::ApiGatewayV2::Route", { RouteKey: "DELETE /players/{playerId}" });
+  template.hasResourceProperties("AWS::ApiGatewayV2::Route", { RouteKey: "POST /games/{gameId}/questions/{questionId}/audio" });
   template.hasResourceProperties("AWS::DynamoDB::Table", { BillingMode: "PAY_PER_REQUEST", KeySchema: [{ AttributeName: Match.anyValue(), KeyType: "HASH" }] });
   template.allResourcesProperties("AWS::DynamoDB::Table", Match.objectLike({ BillingMode: "PAY_PER_REQUEST" }));
   template.hasResourceProperties("AWS::DynamoDB::Table", { TableName: "dev-family-learning-games-games" });
@@ -88,9 +105,9 @@ test("provisions one guarded Bedrock integration with scoped IAM when enabled by
   const app = new App({ context: { aiGameGenerationEnabled: "true" } });
   const template = Template.fromStack(new FamilyLearningGamesBackendStack(app, "EnabledStack"));
 
-  template.resourceCountIs("AWS::Lambda::Function", 1);
+  assertSingleApplicationLambda(template);
   template.resourceCountIs("AWS::ApiGatewayV2::Api", 1);
-  template.resourceCountIs("AWS::ApiGatewayV2::Route", 11);
+  template.resourceCountIs("AWS::ApiGatewayV2::Route", 12);
   template.resourceCountIs("AWS::DynamoDB::Table", 3);
   template.resourceCountIs("AWS::Bedrock::Guardrail", 1);
   template.resourceCountIs("AWS::Bedrock::GuardrailVersion", 1);
@@ -164,7 +181,9 @@ test("provisions one guarded Bedrock integration with scoped IAM when enabled by
   assert.match(synthesized, /bedrock:ApplyGuardrail/);
   assert.match(synthesized, /dynamodb:PutItem/);
   assert.doesNotMatch(synthesized, /"Action":"bedrock:\*"/);
-  assert.doesNotMatch(synthesized, /"Resource":"\*"/);
+  // v0.8: the only wildcard resource allowed is polly:SynthesizeSpeech, which
+  // supports resource-level scoping for lexicons only (none are used).
+  assert.doesNotMatch(synthesized.replace('{"Action":"polly:SynthesizeSpeech","Effect":"Allow","Resource":"*"}', ""), /"Resource":"\*"/);
   const gamesTableLogicalId = Object.entries(template.findResources("AWS::DynamoDB::Table"))
     .find(([, resource]) => resource.Properties.TableName === "dev-family-learning-games-games")?.[0];
   assert.ok(gamesTableLogicalId);
@@ -365,4 +384,151 @@ test("lets explicit allowedOrigins props override context and rejects malformed 
       /invalid CDK context/i,
     );
   });
+});
+
+test("v0.8 adds exactly one private, encrypted, TLS-only media bucket with audio-only lifecycle", () => {
+  const app = new App({ context: { allowedOrigins: "http://localhost:3000,https://play.example.com" } });
+  const template = Template.fromStack(new FamilyLearningGamesBackendStack(app, "MediaStack"));
+
+  template.resourceCountIs("AWS::S3::Bucket", 1);
+  assertSingleApplicationLambda(template);
+  template.resourceCountIs("AWS::ApiGatewayV2::Api", 1);
+  template.resourceCountIs("AWS::DynamoDB::Table", 3);
+  for (const forbidden of ["AWS::CloudFront::Distribution", "AWS::SQS::Queue", "AWS::SNS::Topic", "AWS::StepFunctions::StateMachine", "AWS::Events::Rule", "AWS::Cognito::UserPool"]) {
+    template.resourceCountIs(forbidden, 0);
+  }
+  template.hasResourceProperties("AWS::S3::Bucket", {
+    PublicAccessBlockConfiguration: {
+      BlockPublicAcls: true,
+      BlockPublicPolicy: true,
+      IgnorePublicAcls: true,
+      RestrictPublicBuckets: true,
+    },
+    OwnershipControls: { Rules: [{ ObjectOwnership: "BucketOwnerEnforced" }] },
+    BucketEncryption: {
+      ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: "AES256" } }],
+    },
+    WebsiteConfiguration: Match.absent(),
+    LifecycleConfiguration: {
+      Rules: [Match.objectLike({ Prefix: "audio-cache/", ExpirationInDays: 30, Status: "Enabled" })],
+    },
+    CorsConfiguration: {
+      CorsRules: [Match.objectLike({
+        AllowedMethods: ["GET", "HEAD"],
+        AllowedOrigins: ["http://localhost:3000", "https://play.example.com"],
+      })],
+    },
+  });
+  // Default `environment=dev`: destroyed with the stack, objects emptied first.
+  template.hasResource("AWS::S3::Bucket", { DeletionPolicy: "Delete", UpdateReplacePolicy: "Delete" });
+  template.resourceCountIs("Custom::S3AutoDeleteObjects", 1);
+  const bucket = Object.values(template.findResources("AWS::S3::Bucket"))[0];
+  const lifecycleRules = bucket.Properties.LifecycleConfiguration.Rules as Array<{ Prefix?: string }>;
+  assert.deepEqual(lifecycleRules.map((rule) => rule.Prefix), ["audio-cache/"]);
+  const serialized = JSON.stringify(template.toJSON());
+  assert.equal(serialized.includes("PublicRead"), false);
+
+  // TLS-only bucket policy, and no statement opening the bucket to anonymous principals.
+  template.hasResourceProperties("AWS::S3::BucketPolicy", {
+    PolicyDocument: {
+      Statement: Match.arrayWith([
+        Match.objectLike({ Effect: "Deny", Action: "s3:*", Condition: { Bool: { "aws:SecureTransport": "false" } } }),
+      ]),
+    },
+  });
+  // The only Allow in the bucket policy is CDK's auto-delete role (dev only); never a public/anonymous principal.
+  const bucketPolicyStatements = Object.values(template.findResources("AWS::S3::BucketPolicy"))
+    .flatMap((resource) => resource.Properties.PolicyDocument.Statement as Array<{ Effect: string; Principal?: unknown }>);
+  const allows = bucketPolicyStatements.filter((statement) => statement.Effect === "Allow");
+  assert.equal(allows.length, 1);
+  assert.match(JSON.stringify(allows[0].Principal), /CustomS3AutoDeleteObjectsCustomResourceProviderRole/);
+  assert.equal(JSON.stringify(allows[0].Principal).includes('"*"'), false);
+
+  template.hasResourceProperties("AWS::Lambda::Function", {
+    Environment: {
+      Variables: Match.objectLike({
+        MEDIA_BUCKET_NAME: Match.anyValue(),
+        POLLY_VOICE_ID: "Lupe",
+        POLLY_ENGINE: "neural",
+        POLLY_LANGUAGE_CODE: "es-US",
+        POLLY_OUTPUT_FORMAT: "mp3",
+        AUDIO_URL_TTL_SECONDS: "900",
+        IMAGE_URL_TTL_SECONDS: "900",
+        AUDIO_CACHE_VERSION: "v1",
+      }),
+    },
+  });
+});
+
+test("v0.8 media IAM is least privilege: scoped S3 prefixes and only polly:SynthesizeSpeech", () => {
+  const app = new App();
+  const template = Template.fromStack(new FamilyLearningGamesBackendStack(app, "MediaIamStack"));
+  const bucketLogicalId = Object.keys(template.findResources("AWS::S3::Bucket"))[0];
+  const statements = Object.values(template.findResources("AWS::IAM::Policy"))
+    .flatMap((resource) => resource.Properties.PolicyDocument.Statement as Array<{ Action: string | string[]; Resource: unknown }>);
+  const actionsOf = (statement: { Action: string | string[] }) => [statement.Action].flat();
+  const allActions = statements.flatMap(actionsOf);
+
+  for (const wildcard of ["s3:*", "polly:*", "*"]) assert.equal(allActions.includes(wildcard), false, wildcard);
+  assert.equal(allActions.filter((action) => action.startsWith("polly:")).join(","), "polly:SynthesizeSpeech");
+  assert.equal(allActions.includes("s3:DeleteObject"), false);
+  assert.equal(allActions.includes("s3:PutObjectAcl"), false);
+
+  const s3Statements = statements.filter((statement) => actionsOf(statement).some((action) => action.startsWith("s3:")));
+  for (const statement of s3Statements) {
+    const resource = JSON.stringify(statement.Resource);
+    assert.equal(resource.includes(bucketLogicalId), true, "S3 access is scoped to the media bucket");
+    assert.equal(resource === JSON.stringify("*"), false);
+  }
+  const put = s3Statements.find((statement) => actionsOf(statement).includes("s3:PutObject"));
+  assert.ok(put);
+  assert.equal(JSON.stringify(put!.Resource).includes("/audio-cache/*"), true);
+  assert.equal(JSON.stringify(put!.Resource).includes("/images/*"), false, "curated images are read-only for the Lambda");
+  const get = s3Statements.find((statement) => actionsOf(statement).includes("s3:GetObject"));
+  assert.ok(get);
+  assert.equal(JSON.stringify(get!.Resource).includes("/audio-cache/*"), true);
+  assert.equal(JSON.stringify(get!.Resource).includes("/images/*"), true);
+});
+
+test("v0.8 uses one fixed Polly profile (Lupe/neural/es-US/mp3) while cache version and expiration stay configurable", () => {
+  // Former per-deploy voice/language context keys are not read: the profile cannot be changed to es-MX/es-ES.
+  const app = new App({ context: { pollyVoiceId: "Mia", pollyEngine: "standard", pollyLanguageCode: "es-MX", audioCacheVersion: "v2", audioCacheExpirationDays: "7" } });
+  const template = Template.fromStack(new FamilyLearningGamesBackendStack(app, "MediaConfigStack"));
+  template.hasResourceProperties("AWS::Lambda::Function", {
+    Environment: { Variables: Match.objectLike({ POLLY_VOICE_ID: "Lupe", POLLY_ENGINE: "neural", POLLY_LANGUAGE_CODE: "es-US", POLLY_OUTPUT_FORMAT: "mp3", AUDIO_CACHE_VERSION: "v2" }) },
+  });
+  template.hasResourceProperties("AWS::S3::Bucket", {
+    LifecycleConfiguration: { Rules: [Match.objectLike({ Prefix: "audio-cache/", ExpirationInDays: 7 })] },
+  });
+});
+
+test("v0.8 media bucket removal: dev (default) is destroyed and emptied; prod is retained without the cleanup handler", () => {
+  const dev = Template.fromStack(new FamilyLearningGamesBackendStack(new App(), "DevMediaStack"));
+  dev.hasResource("AWS::S3::Bucket", { DeletionPolicy: "Delete", UpdateReplacePolicy: "Delete" });
+  dev.resourceCountIs("Custom::S3AutoDeleteObjects", 1);
+  assertSingleApplicationLambda(dev, true);
+
+  for (const environment of ["prod", "production"]) {
+    const prod = Template.fromStack(new FamilyLearningGamesBackendStack(new App({ context: { environment } }), `ProdMediaStack${environment}`));
+    prod.hasResource("AWS::S3::Bucket", { DeletionPolicy: "Retain", UpdateReplacePolicy: "Retain" });
+    prod.resourceCountIs("Custom::S3AutoDeleteObjects", 0);
+    assertSingleApplicationLambda(prod, false);
+    const statements = Object.values(prod.findResources("AWS::S3::BucketPolicy"))
+      .flatMap((resource) => resource.Properties.PolicyDocument.Statement as Array<{ Effect: string }>);
+    assert.equal(statements.some((statement) => statement.Effect === "Allow"), false);
+  }
+});
+
+test("v0.8 IAM wildcards: Resource \"*\" appears only on the single polly:SynthesizeSpeech statement", () => {
+  for (const context of [{}, { aiGameGenerationEnabled: "true" }]) {
+    const template = Template.fromStack(new FamilyLearningGamesBackendStack(new App({ context }), "WildcardStack"));
+    const backendPolicies = Object.entries(template.findResources("AWS::IAM::Policy"))
+      .filter(([logicalId]) => logicalId.startsWith("BackendFunctionServiceRole"));
+    const statements = backendPolicies.flatMap(([, resource]) => resource.Properties.PolicyDocument.Statement as Array<{ Action: string | string[]; Resource: unknown; Effect: string }>);
+    const wildcard = statements.filter((statement) => JSON.stringify(statement.Resource) === JSON.stringify("*"));
+    assert.deepEqual(wildcard, [{ Action: "polly:SynthesizeSpeech", Effect: "Allow", Resource: "*" }]);
+    const actions = statements.flatMap((statement) => [statement.Action].flat());
+    for (const forbidden of ["polly:*", "s3:*", "*", "dynamodb:*", "bedrock:*"]) assert.equal(actions.includes(forbidden), false, forbidden);
+    assert.deepEqual(actions.filter((action) => action.startsWith("polly:")), ["polly:SynthesizeSpeech"]);
+  }
 });
