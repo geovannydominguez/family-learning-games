@@ -52,6 +52,12 @@
       "difficulty": "easy",
       "text": "¿Qué animal dice miau?",
       "emoji": "🐱",
+      "media": {
+        "image": {
+          "assetId": "animals/cat-01",
+          "altText": "Gato doméstico"
+        }
+      },
       "answers": [
         {
           "id": "animals-easy-1-a1",
