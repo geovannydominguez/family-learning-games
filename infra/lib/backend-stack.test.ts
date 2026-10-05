@@ -555,7 +555,8 @@ test("v0.9 adds one WebSocket API whose routes all integrate the same backend La
   const backendLogicalId = Object.entries(template.findResources("AWS::Lambda::Function"))
     .find(([, resource]) => resource.Properties.FunctionName === "family-learning-games-backend")![0];
   const integrations = Object.values(template.findResources("AWS::ApiGatewayV2::Integration"));
-  assert.equal(integrations.length, 2);
+  // One HTTP integration plus one WebSocket integration per route (all on the same Lambda).
+  assert.equal(integrations.length, 1 + webSocketRoutes.length);
   for (const integration of integrations) {
     assert.equal(integration.Properties.IntegrationType, "AWS_PROXY");
     assert.match(JSON.stringify(integration.Properties.IntegrationUri), new RegExp(backendLogicalId));
@@ -583,6 +584,34 @@ test("v0.9 adds one WebSocket API whose routes all integrate the same backend La
       }),
     },
   });
+});
+
+test("v0.9 API Gateway may invoke the backend Lambda from every WebSocket route", () => {
+  const template = Template.fromStack(new FamilyLearningGamesBackendStack(new App(), "MultiplayerPermissionStack"));
+  const [webSocketApiId] = Object.entries(template.findResources("AWS::ApiGatewayV2::Api"))
+    .find(([, resource]) => resource.Properties.ProtocolType === "WEBSOCKET")!;
+  const backendLogicalId = Object.entries(template.findResources("AWS::Lambda::Function"))
+    .find(([, resource]) => resource.Properties.FunctionName === "family-learning-games-backend")![0];
+
+  // A WebSocket invoke permission's SourceArn is Fn::Join([..., { Ref: <ws api> }, "/<suffix>"]).
+  const webSocketPermissionSuffixes = Object.values(template.findResources("AWS::Lambda::Permission"))
+    .filter((permission) => permission.Properties.Action === "lambda:InvokeFunction"
+      && permission.Properties.Principal === "apigateway.amazonaws.com"
+      && JSON.stringify(permission.Properties.FunctionName).includes(backendLogicalId))
+    .map((permission) => permission.Properties.SourceArn?.["Fn::Join"]?.[1] as unknown[] | undefined)
+    .filter((parts): parts is unknown[] => Array.isArray(parts)
+      && parts.some((part) => JSON.stringify(part) === JSON.stringify({ Ref: webSocketApiId })))
+    .map((parts) => String(parts[parts.length - 1]));
+
+  const routeKeys = ["$connect", "$disconnect", "$default", "IDENTIFY", "START_GAME", "SUBMIT_ANSWER", "QUESTION_TIMEOUT", "NEXT_QUESTION", "SYNC_ROOM"];
+  for (const routeKey of routeKeys) {
+    assert.ok(
+      webSocketPermissionSuffixes.includes(`/*${routeKey}`),
+      `missing lambda:InvokeFunction permission for WebSocket route ${routeKey} (found: ${webSocketPermissionSuffixes.join(", ")})`,
+    );
+  }
+  // Permissions stay scoped per route: no blanket grant on the whole WebSocket API.
+  assert.deepEqual(webSocketPermissionSuffixes.sort(), routeKeys.map((routeKey) => `/*${routeKey}`).sort());
 });
 
 test("v0.9 adds exactly one multiplayer table with PK/SK and TTL, preserving the existing tables", () => {

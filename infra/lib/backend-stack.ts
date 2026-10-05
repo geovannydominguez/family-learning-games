@@ -318,11 +318,13 @@ export class FamilyLearningGamesBackendStack extends Stack {
     // v0.9 multiplayer routes: two HTTP bootstrap routes and the WebSocket routes, all on the same Lambda.
     api.addRoutes({ path: "/multiplayer/rooms", methods: [HttpMethod.POST], integration });
     api.addRoutes({ path: "/multiplayer/rooms/{roomCode}/join", methods: [HttpMethod.POST], integration });
-    const webSocketIntegration = new WebSocketLambdaIntegration("MultiplayerWebSocketIntegration", backend);
-    webSocketApi.addRoute("$connect", { integration: webSocketIntegration });
-    webSocketApi.addRoute("$disconnect", { integration: webSocketIntegration });
-    webSocketApi.addRoute("$default", { integration: webSocketIntegration });
-    for (const action of multiplayerWebSocketActions) webSocketApi.addRoute(action, { integration: webSocketIntegration });
+    // One WebSocketLambdaIntegration per route: CDK only grants lambda:InvokeFunction (scoped to
+    // `*<routeKey>`) the first time an integration instance is bound, so a shared instance would
+    // leave every route except the first without invoke permission.
+    for (const routeKey of ["$connect", "$disconnect", "$default", ...multiplayerWebSocketActions]) {
+      const integrationId = routeKey === "$connect" ? "MultiplayerWebSocketIntegration" : `MultiplayerWebSocketIntegration-${routeKey.replace("$", "")}`;
+      webSocketApi.addRoute(routeKey, { integration: new WebSocketLambdaIntegration(integrationId, backend) });
+    }
 
     new CfnOutput(this, "ApiUrl", { value: api.apiEndpoint });
     // Public (non-secret) frontend configuration: NEXT_PUBLIC_MULTIPLAYER_WEBSOCKET_URL.
