@@ -195,3 +195,19 @@ test("v0.8: audio failures surface as GameApiError with the safe backend code", 
   await assert.rejects(client.getQuestionAudio("animals", "q1"), (error: unknown) =>
     error instanceof GameApiError && error.code === "QUESTION_AUDIO_FAILED" && error.status === 502);
 });
+
+test("v0.9 multiplayer bootstrap posts to the room routes and surfaces safe error codes", async () => {
+  const requests: Array<{ input: string; init?: RequestInit }> = [];
+  const client = new GameApiClient("https://api.example.com/", async (input, init) => {
+    requests.push({ input: String(input), init });
+    if (String(input).endsWith("/join")) return new Response(JSON.stringify({ error: { code: "ROOM_FULL", message: "The room is full." } }), { status: 409 });
+    return new Response(JSON.stringify({ roomId: "r", roomCode: "AB7K2M", playerId: "ana", role: "HOST", participantToken: "t", questionTimeLimitSeconds: 30 }), { status: 201 });
+  });
+
+  assert.equal((await client.createMultiplayerRoom({ gameId: "animals", playerId: "ana", questionTimeLimitSeconds: 30, difficulty: "easy" })).roomCode, "AB7K2M");
+  await assert.rejects(client.joinMultiplayerRoom("AB7K2M", "beto"), (error) => error instanceof GameApiError && error.code === "ROOM_FULL" && error.status === 409);
+  assert.equal(requests[0].input, "https://api.example.com/multiplayer/rooms");
+  assert.deepEqual(JSON.parse(String(requests[0].init?.body)), { gameId: "animals", playerId: "ana", questionTimeLimitSeconds: 30, difficulty: "easy" });
+  assert.equal(requests[1].input, "https://api.example.com/multiplayer/rooms/AB7K2M/join");
+  assert.deepEqual(JSON.parse(String(requests[1].init?.body)), { playerId: "beto" });
+});

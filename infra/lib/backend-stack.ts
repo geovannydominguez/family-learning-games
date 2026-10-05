@@ -3,8 +3,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CfnOutput, Duration, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
-import { CfnRoute, CfnStage, HttpMethod, CorsHttpMethod, HttpApi } from "aws-cdk-lib/aws-apigatewayv2";
-import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
+import { CfnRoute, CfnStage, HttpMethod, CorsHttpMethod, HttpApi, WebSocketApi, WebSocketStage } from "aws-cdk-lib/aws-apigatewayv2";
+import { HttpLambdaIntegration, WebSocketLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import { CfnGuardrail, CfnGuardrailVersion } from "aws-cdk-lib/aws-bedrock";
 import { Runtime } from "aws-cdk-lib/aws-lambda";
 import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
@@ -21,6 +21,9 @@ const pollyVoiceId = "Lupe";
 const pollyEngine = "neural";
 const pollyLanguageCode = "es-US";
 const defaultAudioCacheExpirationDays = 30;
+// v0.9 — ADR-018: client → server actions routed by `$request.body.action`.
+const multiplayerWebSocketActions = ["IDENTIFY", "START_GAME", "SUBMIT_ANSWER", "QUESTION_TIMEOUT", "NEXT_QUESTION", "SYNC_ROOM"];
+const multiplayerWebSocketStageName = "production";
 
 export interface FamilyLearningGamesBackendStackProps extends StackProps {
   aiGameGenerationEnabled?: boolean;
@@ -112,6 +115,28 @@ export class FamilyLearningGamesBackendStack extends Stack {
         maxAge: 3_600,
       }],
     });
+    // v0.9 — ADR-019: one dedicated table for ephemeral multiplayer coordination
+    // (rooms, memberships, answers, connection reverse lookups, room-code
+    // reservations). Single-table PK/SK; room codes resolve through a
+    // reservation item, so no GSI or scan is needed. TTL is eventual cleanup only.
+    const multiplayerTable = new Table(this, "MultiplayerTable", {
+      tableName: `${resourcePrefix}-multiplayer`,
+      partitionKey: { name: "PK", type: AttributeType.STRING },
+      sortKey: { name: "SK", type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: "expiresAt",
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    // v0.9 — ADR-018: WebSocket API for real-time multiplayer, served by the same backend Lambda.
+    const webSocketApi = new WebSocketApi(this, "MultiplayerWebSocketApi", {
+      apiName: "family-learning-games-multiplayer",
+      routeSelectionExpression: "$request.body.action",
+    });
+    const webSocketStage = new WebSocketStage(this, "MultiplayerWebSocketStage", {
+      webSocketApi,
+      stageName: multiplayerWebSocketStageName,
+      autoDeploy: true,
+    });
     const logGroup = new LogGroup(this, "BackendLogs", {
       logGroupName: "/aws/lambda/family-learning-games-backend",
       retention: RetentionDays.ONE_WEEK,
@@ -130,6 +155,13 @@ export class FamilyLearningGamesBackendStack extends Stack {
       AUDIO_URL_TTL_SECONDS: "900",
       IMAGE_URL_TTL_SECONDS: "900",
       AUDIO_CACHE_VERSION: readStringContext(this.node.tryGetContext("audioCacheVersion"), "v1"),
+      MULTIPLAYER_TABLE_NAME: multiplayerTable.tableName,
+      MULTIPLAYER_MAX_PLAYERS: String(readMultiplayerMaxPlayers(this.node.tryGetContext("multiplayerMaxPlayers"))),
+      MULTIPLAYER_ROOM_TTL_MINUTES: "120",
+      MULTIPLAYER_PLACEMENT_TIE_WINDOW_MS: "100",
+      // `$connect` Origin validation reuses the same explicit allowed-origins list as HTTP CORS.
+      MULTIPLAYER_ALLOWED_ORIGINS: allowedOrigins.join(","),
+      WEBSOCKET_CALLBACK_ENDPOINT: webSocketStage.callbackUrl,
     };
     let guardrail: CfnGuardrail | undefined;
 
@@ -189,6 +221,23 @@ export class FamilyLearningGamesBackendStack extends Stack {
       effect: Effect.ALLOW,
       actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Scan"],
       resources: [playersTable.tableArn],
+    }));
+    // v0.9 multiplayer table: item-level reads/writes (transactions use these
+    // same actions) and Query on the base table only.
+    backend.addToRolePolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query"],
+      resources: [multiplayerTable.tableArn],
+    }));
+    // v0.9 broadcasts: postToConnection on this WebSocket API stage only.
+    backend.addToRolePolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ["execute-api:ManageConnections"],
+      resources: [this.formatArn({
+        service: "execute-api",
+        resource: webSocketApi.apiId,
+        resourceName: `${multiplayerWebSocketStageName}/POST/@connections/*`,
+      })],
     }));
     // v0.8 media (least privilege): read curated images and cached audio, write
     // only the derived audio cache. ListBucket on this one bucket only lets a
@@ -266,7 +315,19 @@ export class FamilyLearningGamesBackendStack extends Stack {
       },
     };
 
+    // v0.9 multiplayer routes: two HTTP bootstrap routes and the WebSocket routes, all on the same Lambda.
+    api.addRoutes({ path: "/multiplayer/rooms", methods: [HttpMethod.POST], integration });
+    api.addRoutes({ path: "/multiplayer/rooms/{roomCode}/join", methods: [HttpMethod.POST], integration });
+    const webSocketIntegration = new WebSocketLambdaIntegration("MultiplayerWebSocketIntegration", backend);
+    webSocketApi.addRoute("$connect", { integration: webSocketIntegration });
+    webSocketApi.addRoute("$disconnect", { integration: webSocketIntegration });
+    webSocketApi.addRoute("$default", { integration: webSocketIntegration });
+    for (const action of multiplayerWebSocketActions) webSocketApi.addRoute(action, { integration: webSocketIntegration });
+
     new CfnOutput(this, "ApiUrl", { value: api.apiEndpoint });
+    // Public (non-secret) frontend configuration: NEXT_PUBLIC_MULTIPLAYER_WEBSOCKET_URL.
+    new CfnOutput(this, "MultiplayerWebSocketUrl", { value: webSocketStage.url });
+    new CfnOutput(this, "MultiplayerTableName", { value: multiplayerTable.tableName });
     new CfnOutput(this, "FunctionName", { value: backend.functionName });
     new CfnOutput(this, "GamesTableName", { value: gamesTable.tableName });
     new CfnOutput(this, "GameSessionsTableName", { value: gameSessionsTable.tableName });
@@ -292,6 +353,13 @@ function readPositiveNumber(value: unknown, key: string, integer = false): numbe
     throw new Error(`Invalid CDK context ${key}: expected a positive${integer ? " integer" : " number"}.`);
   }
   return parsed;
+}
+
+/** v0.9 room capacity: configuration, bounded to the supported 2..8 players. */
+function readMultiplayerMaxPlayers(value: unknown): number {
+  const maxPlayers = readPositiveNumber(value ?? 8, "multiplayerMaxPlayers", true);
+  if (maxPlayers < 2 || maxPlayers > 8) throw new Error("Invalid CDK context multiplayerMaxPlayers: expected an integer between 2 and 8.");
+  return maxPlayers;
 }
 
 function readStringContext(value: unknown, defaultValue: string): string {

@@ -21,13 +21,14 @@ function assertSingleApplicationLambda(template: Template, expectAutoDeleteHandl
   assert.equal(helpers.length, expectAutoDeleteHandler ? 1 : 0);
 }
 
-test("defines the default-disabled Lambda, twelve-route HTTP API, durable tables and least-privilege access", () => {
+test("defines the default-disabled Lambda, fourteen-route HTTP API, durable tables and least-privilege access", () => {
   const app = new App({ context: { frontendOrigin: "https://family.example.com" } });
   const template = Template.fromStack(new FamilyLearningGamesBackendStack(app, "TestStack"));
   assertSingleApplicationLambda(template);
-  template.resourceCountIs("AWS::ApiGatewayV2::Api", 1);
-  template.resourceCountIs("AWS::ApiGatewayV2::Route", 12);
-  template.resourceCountIs("AWS::DynamoDB::Table", 3);
+  // v0.9: the existing HTTP API (14 routes) plus the multiplayer WebSocket API (9 routes).
+  template.resourceCountIs("AWS::ApiGatewayV2::Api", 2);
+  template.resourceCountIs("AWS::ApiGatewayV2::Route", 23);
+  template.resourceCountIs("AWS::DynamoDB::Table", 4);
   template.resourceCountIs("AWS::Logs::LogGroup", 1);
   template.hasResourceProperties("AWS::Lambda::Function", { Runtime: "nodejs22.x", Timeout: 10 });
   template.hasResourceProperties("AWS::Lambda::Function", {
@@ -106,9 +107,9 @@ test("provisions one guarded Bedrock integration with scoped IAM when enabled by
   const template = Template.fromStack(new FamilyLearningGamesBackendStack(app, "EnabledStack"));
 
   assertSingleApplicationLambda(template);
-  template.resourceCountIs("AWS::ApiGatewayV2::Api", 1);
-  template.resourceCountIs("AWS::ApiGatewayV2::Route", 12);
-  template.resourceCountIs("AWS::DynamoDB::Table", 3);
+  template.resourceCountIs("AWS::ApiGatewayV2::Api", 2);
+  template.resourceCountIs("AWS::ApiGatewayV2::Route", 23);
+  template.resourceCountIs("AWS::DynamoDB::Table", 4);
   template.resourceCountIs("AWS::Bedrock::Guardrail", 1);
   template.resourceCountIs("AWS::Bedrock::GuardrailVersion", 1);
   template.hasResourceProperties("AWS::Lambda::Function", {
@@ -392,8 +393,8 @@ test("v0.8 adds exactly one private, encrypted, TLS-only media bucket with audio
 
   template.resourceCountIs("AWS::S3::Bucket", 1);
   assertSingleApplicationLambda(template);
-  template.resourceCountIs("AWS::ApiGatewayV2::Api", 1);
-  template.resourceCountIs("AWS::DynamoDB::Table", 3);
+  template.resourceCountIs("AWS::ApiGatewayV2::Api", 2);
+  template.resourceCountIs("AWS::DynamoDB::Table", 4);
   for (const forbidden of ["AWS::CloudFront::Distribution", "AWS::SQS::Queue", "AWS::SNS::Topic", "AWS::StepFunctions::StateMachine", "AWS::Events::Rule", "AWS::Cognito::UserPool"]) {
     template.resourceCountIs(forbidden, 0);
   }
@@ -531,4 +532,100 @@ test("v0.8 IAM wildcards: Resource \"*\" appears only on the single polly:Synthe
     for (const forbidden of ["polly:*", "s3:*", "*", "dynamodb:*", "bedrock:*"]) assert.equal(actions.includes(forbidden), false, forbidden);
     assert.deepEqual(actions.filter((action) => action.startsWith("polly:")), ["polly:SynthesizeSpeech"]);
   }
+});
+
+test("v0.9 adds one WebSocket API whose routes all integrate the same backend Lambda", () => {
+  const app = new App({ context: { allowedOrigins: "http://localhost:3000,https://play.example.com" } });
+  const template = Template.fromStack(new FamilyLearningGamesBackendStack(app, "MultiplayerStack"));
+  assertSingleApplicationLambda(template);
+  const apis = Object.entries(template.findResources("AWS::ApiGatewayV2::Api"));
+  const webSocketApis = apis.filter(([, resource]) => resource.Properties.ProtocolType === "WEBSOCKET");
+  assert.equal(webSocketApis.length, 1);
+  assert.equal(apis.filter(([, resource]) => resource.Properties.ProtocolType === "HTTP").length, 1);
+  const [webSocketApiId, webSocketApi] = webSocketApis[0];
+  assert.equal(webSocketApi.Properties.RouteSelectionExpression, "$request.body.action");
+
+  const webSocketRoutes = Object.values(template.findResources("AWS::ApiGatewayV2::Route"))
+    .filter((route) => JSON.stringify(route.Properties.ApiId) === JSON.stringify({ Ref: webSocketApiId }));
+  assert.deepEqual(
+    webSocketRoutes.map((route) => route.Properties.RouteKey).sort(),
+    ["$connect", "$default", "$disconnect", "IDENTIFY", "NEXT_QUESTION", "QUESTION_TIMEOUT", "START_GAME", "SUBMIT_ANSWER", "SYNC_ROOM"].sort(),
+  );
+  // Every integration (HTTP and WebSocket) proxies to the single backend function.
+  const backendLogicalId = Object.entries(template.findResources("AWS::Lambda::Function"))
+    .find(([, resource]) => resource.Properties.FunctionName === "family-learning-games-backend")![0];
+  const integrations = Object.values(template.findResources("AWS::ApiGatewayV2::Integration"));
+  assert.equal(integrations.length, 2);
+  for (const integration of integrations) {
+    assert.equal(integration.Properties.IntegrationType, "AWS_PROXY");
+    assert.match(JSON.stringify(integration.Properties.IntegrationUri), new RegExp(backendLogicalId));
+  }
+  template.hasResourceProperties("AWS::ApiGatewayV2::Stage", { ApiId: { Ref: webSocketApiId }, StageName: "production", AutoDeploy: true });
+  template.hasResourceProperties("AWS::ApiGatewayV2::Route", { RouteKey: "POST /multiplayer/rooms" });
+  template.hasResourceProperties("AWS::ApiGatewayV2::Route", { RouteKey: "POST /multiplayer/rooms/{roomCode}/join" });
+  for (const forbidden of ["AWS::AppSync::GraphQLApi", "AWS::Cognito::UserPool", "AWS::ElastiCache::CacheCluster", "AWS::StepFunctions::StateMachine", "AWS::Scheduler::Schedule", "AWS::Events::Rule", "AWS::ECS::Cluster"]) {
+    template.resourceCountIs(forbidden, 0);
+  }
+
+  // Frontend configuration (public WSS URL) and backend wiring.
+  const outputs = template.toJSON().Outputs as Record<string, { Value: unknown }>;
+  assert.ok(outputs.MultiplayerWebSocketUrl);
+  assert.match(JSON.stringify(outputs.MultiplayerWebSocketUrl.Value), /wss:\/\//);
+  assert.ok(outputs.MultiplayerTableName);
+  template.hasResourceProperties("AWS::Lambda::Function", {
+    Environment: {
+      Variables: Match.objectLike({
+        MULTIPLAYER_TABLE_NAME: Match.anyValue(),
+        MULTIPLAYER_MAX_PLAYERS: "8",
+        MULTIPLAYER_ROOM_TTL_MINUTES: "120",
+        MULTIPLAYER_ALLOWED_ORIGINS: "http://localhost:3000,https://play.example.com",
+        WEBSOCKET_CALLBACK_ENDPOINT: Match.anyValue(),
+      }),
+    },
+  });
+});
+
+test("v0.9 adds exactly one multiplayer table with PK/SK and TTL, preserving the existing tables", () => {
+  const template = Template.fromStack(new FamilyLearningGamesBackendStack(new App({ context: { multiplayerMaxPlayers: "6" } }), "MultiplayerTableStack"));
+  template.resourceCountIs("AWS::DynamoDB::Table", 4);
+  for (const name of ["games", "game-sessions", "players"]) {
+    template.hasResourceProperties("AWS::DynamoDB::Table", { TableName: `dev-family-learning-games-${name}` });
+  }
+  template.hasResourceProperties("AWS::DynamoDB::Table", {
+    TableName: "dev-family-learning-games-multiplayer",
+    BillingMode: "PAY_PER_REQUEST",
+    KeySchema: [{ AttributeName: "PK", KeyType: "HASH" }, { AttributeName: "SK", KeyType: "RANGE" }],
+    TimeToLiveSpecification: { AttributeName: "expiresAt", Enabled: true },
+    // Room codes resolve through a strongly consistent reservation item, not an index.
+    GlobalSecondaryIndexes: Match.absent(),
+  });
+  // Capacity is configuration, bounded to the supported 2..8 range.
+  template.hasResourceProperties("AWS::Lambda::Function", { Environment: { Variables: Match.objectLike({ MULTIPLAYER_MAX_PLAYERS: "6" }) } });
+  for (const multiplayerMaxPlayers of ["1", "9", "abc"]) {
+    assert.throws(() => new FamilyLearningGamesBackendStack(new App({ context: { multiplayerMaxPlayers } }), `InvalidCapacity${multiplayerMaxPlayers}`), /multiplayerMaxPlayers/);
+  }
+});
+
+test("v0.9 multiplayer IAM is scoped to the multiplayer table and the WebSocket stage's @connections", () => {
+  const template = Template.fromStack(new FamilyLearningGamesBackendStack(new App(), "MultiplayerIamStack"));
+  const tableLogicalId = Object.entries(template.findResources("AWS::DynamoDB::Table"))
+    .find(([, resource]) => resource.Properties.TableName === "dev-family-learning-games-multiplayer")![0];
+  const webSocketApiId = Object.entries(template.findResources("AWS::ApiGatewayV2::Api"))
+    .find(([, resource]) => resource.Properties.ProtocolType === "WEBSOCKET")![0];
+  const statements = Object.values(template.findResources("AWS::IAM::Policy"))
+    .flatMap((resource) => resource.Properties.PolicyDocument.Statement as Array<{ Action: string | string[]; Resource: unknown }>);
+
+  const tableStatements = statements.filter((statement) => JSON.stringify(statement.Resource).includes(tableLogicalId));
+  assert.equal(tableStatements.length, 1);
+  assert.deepEqual([tableStatements[0].Action].flat(), ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query"]);
+  assert.equal(JSON.stringify(tableStatements[0].Resource).includes("/index/"), false);
+  assert.equal(JSON.stringify(tableStatements[0].Resource), JSON.stringify({ "Fn::GetAtt": [tableLogicalId, "Arn"] }));
+
+  const manage = statements.filter((statement) => [statement.Action].flat().some((action) => action.startsWith("execute-api:")));
+  assert.equal(manage.length, 1);
+  assert.deepEqual([manage[0].Action].flat(), ["execute-api:ManageConnections"]);
+  const resource = JSON.stringify(manage[0].Resource);
+  assert.match(resource, new RegExp(webSocketApiId));
+  assert.match(resource, /\/production\/POST\/@connections\/\*/);
+  assert.equal(resource === JSON.stringify("*"), false);
 });

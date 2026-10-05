@@ -8,6 +8,11 @@ import type {
 import type { GenerateGameCommand } from "../../application/game/GameGenerator.ts";
 import type { QuestionAudioResponse } from "../../application/media/questionSpeech.ts";
 import type {
+  CreateMultiplayerRoomResponse,
+  JoinMultiplayerRoomResponse,
+} from "../../application/multiplayer/contracts.ts";
+import type { Difficulty } from "../../domain/game/types.ts";
+import type {
   CreatePlayerRequest,
   PlayersListResponse,
   UpdatePlayerRequest,
@@ -85,6 +90,15 @@ export class GameApiClient {
       `/games/${encodeURIComponent(gameId)}/questions/${encodeURIComponent(questionId)}/audio`,
       { method: "POST", body: "{}" },
     );
+  }
+
+  /** v0.9: bootstrap a multiplayer room. The response carries a one-time participant token. */
+  createMultiplayerRoom(request: { gameId: string; playerId: string; questionTimeLimitSeconds: number; difficulty?: Difficulty }): Promise<CreateMultiplayerRoomResponse> {
+    return this.request("/multiplayer/rooms", { method: "POST", body: JSON.stringify(request) });
+  }
+
+  joinMultiplayerRoom(roomCode: string, playerId: string): Promise<JoinMultiplayerRoomResponse> {
+    return this.request(`/multiplayer/rooms/${encodeURIComponent(roomCode)}/join`, { method: "POST", body: JSON.stringify({ playerId }) });
   }
 
   async listPlayers(): Promise<Player[]> {

@@ -4,6 +4,7 @@ import type { GameSessionService } from "../../application/game/gameSessionServi
 import type { PublicGame } from "../../application/game/gameSessionContracts.ts";
 import type { QuestionImageResolver } from "../../application/media/questionImages.ts";
 import type { QuestionSpeechService } from "../../application/media/questionSpeech.ts";
+import type { MultiplayerRoomService } from "../../application/multiplayer/multiplayerRoomService.ts";
 import type { PlayerService } from "../../application/player/playerService.ts";
 import type { Difficulty, Game } from "../../domain/game/types.ts";
 import type { GameRepository } from "../../repositories/game/GameRepository.ts";
@@ -17,6 +18,8 @@ interface RouterDependencies {
   /** v0.8 media (ADR-016/017). Absent when no media bucket is configured. */
   speechService?: QuestionSpeechService;
   imageResolver?: QuestionImageResolver;
+  /** v0.9 multiplayer bootstrap (ADR-018). Absent when no multiplayer table is configured. */
+  multiplayerRoomService?: MultiplayerRoomService;
   log?: (record: RequestLog) => void;
   now?: () => number;
 }
@@ -31,6 +34,7 @@ export function createHttpRouter({
   generationService,
   speechService,
   imageResolver,
+  multiplayerRoomService,
   log = (record) => console.log(JSON.stringify(record)),
   now = Date.now,
 }: RouterDependencies) {
@@ -39,7 +43,7 @@ export function createHttpRouter({
     let response: HttpResponse;
     let caughtError: unknown;
     try {
-      response = await route(request, games, sessionService, playerService, generationService, speechService, imageResolver);
+      response = await route(request, games, sessionService, playerService, generationService, speechService, imageResolver, multiplayerRoomService);
     } catch (error) {
       caughtError = error;
       response = mapError(error);
@@ -52,7 +56,7 @@ export function createHttpRouter({
       timestamp: new Date().toISOString(),
       requestId: request.requestId,
       method: request.method,
-      path: request.path,
+      path: redactPath(request.path),
       statusCode: response.statusCode,
       durationMs: Math.max(0, now() - startedAt),
       ...(errorDiagnostic ? { error: errorDiagnostic } : {}),
@@ -92,6 +96,8 @@ function readRouteContext(request: HttpRequest): { operation: string; resourceId
   if (request.method === "POST" && request.path === "/games/generate") return { operation: "generate-game" };
   if (request.method === "GET" && request.path === "/players") return { operation: "list-players" };
   if (request.method === "POST" && request.path === "/players") return { operation: "create-player" };
+  if (request.method === "POST" && request.path === "/multiplayer/rooms") return { operation: "create-multiplayer-room" };
+  if (request.method === "POST" && joinRoomPath.test(request.path)) return { operation: "join-multiplayer-room" };
   const audio = request.path.match(questionAudioPath);
   if (request.method === "POST" && audio) return withResource("get-question-audio", audio[1]);
   const game = request.path.match(/^\/games\/([^/]+)$/);
@@ -123,6 +129,7 @@ async function route(
   generationService: GenerateGameService | undefined,
   speechService: QuestionSpeechService | undefined,
   imageResolver: QuestionImageResolver | undefined,
+  multiplayerRoomService: MultiplayerRoomService | undefined,
 ): Promise<HttpResponse> {
   if (request.method === "GET" && request.path === "/games") {
     const catalog = await games.findAll();
@@ -200,7 +207,43 @@ async function route(
     await playerService.delete(playerId);
     return json(200, { playerId });
   }
+  if (request.method === "POST" && request.path === "/multiplayer/rooms") {
+    if (!multiplayerRoomService) throw new ApplicationError("MULTIPLAYER_DISABLED", "Multiplayer is not available.");
+    const body = parseObject(request.body);
+    return json(201, await multiplayerRoomService.createRoom({
+      gameId: readString(body, "gameId"),
+      playerId: readString(body, "playerId"),
+      ...(body.questionTimeLimitSeconds !== undefined ? { questionTimeLimitSeconds: body.questionTimeLimitSeconds as number } : {}),
+      ...(body.difficulty !== undefined ? { difficulty: readDifficulty(body.difficulty) } : {}),
+      correlationId: request.requestId,
+    }));
+  }
+  const joinRoute = request.path.match(joinRoomPath);
+  if (request.method === "POST" && joinRoute) {
+    if (!multiplayerRoomService) throw new ApplicationError("MULTIPLAYER_DISABLED", "Multiplayer is not available.");
+    const body = parseObject(request.body);
+    return json(201, await multiplayerRoomService.joinRoom({
+      roomCode: safeDecode(joinRoute[1]),
+      playerId: readString(body, "playerId"),
+      correlationId: request.requestId,
+    }));
+  }
   return json(404, { error: { code: "RESOURCE_NOT_FOUND", message: "Route was not found." } });
+}
+
+const joinRoomPath = /^\/multiplayer\/rooms\/([^/]+)\/join$/;
+
+/** Room codes are not secret, but request logs keep only the route shape (ARCHITECTURE-v0.9 §41). */
+function redactPath(path: string): string {
+  return joinRoomPath.test(path) ? "/multiplayer/rooms/{roomCode}/join" : path;
+}
+
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return "";
+  }
 }
 
 async function toPublicGame(game: Game, imageResolver: QuestionImageResolver | undefined): Promise<PublicGame> {
@@ -301,6 +344,27 @@ function applicationErrorStatus(code: ApplicationError["code"]): number {
     case "INVALID_PLAYER":
     case "INVALID_PLAYER_AGE":
       return 400;
+    case "INVALID_PARTICIPANT_TOKEN":
+    case "NOT_IDENTIFIED":
+      return 401;
+    case "HOST_ONLY_ACTION":
+      return 403;
+    case "ROOM_EXPIRED":
+      return 410;
+    case "ROOM_ALREADY_STARTED":
+    case "ROOM_FULL":
+    case "PLAYER_ALREADY_JOINED":
+    case "NOT_ENOUGH_PLAYERS":
+    case "INVALID_ROOM_STATE":
+    case "INVALID_QUESTION_STATE":
+    case "ANSWER_ALREADY_SUBMITTED":
+    case "ANSWER_DEADLINE_EXPIRED":
+      return 409;
+    case "INVALID_QUESTION":
+    case "INVALID_ANSWER":
+      return 422;
+    case "MULTIPLAYER_DISABLED":
+      return 503;
     case "AI_GENERATED_CONTENT_INVALID":
     // A Guardrail block is a permanent, request-specific refusal (not a transient
     // upstream fault), so it is a 4xx like invalid content — never a 5xx. Provider
@@ -321,6 +385,7 @@ function applicationErrorStatus(code: ApplicationError["code"]): number {
     case "QUESTION_AUDIO_DISABLED":
       return 503;
     case "PLAYER_NOT_FOUND":
+    case "ROOM_NOT_FOUND":
     default:
       return 404;
   }

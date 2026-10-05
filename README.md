@@ -1,6 +1,6 @@
 # Family Learning Games
 
-**Family Learning Games v0.8 — FASE 8: Audio / imágenes.** A family quiz app published at `https://play.joamgames.com` as an installable, online-first PWA (v0.7, ADR-014) served by AWS Amplify Hosting, backed by one API Gateway HTTP API and one Lambda with DynamoDB (games, sessions, family player profiles). AI-generated games use a two-model Claude Sonnet 4.6 Generator/Validator pipeline on Amazon Bedrock with age-aware personalization (v0.6) and the v0.7.1 quality and execution-budget hardening. v0.8 adds on-demand spoken questions through Amazon Polly and optional curated question images, both stored in one private S3 bucket and delivered through short-lived signed URLs (ADR-016, ADR-017).
+**Family Learning Games v0.9 — FASE 9: Multiplayer.** A family quiz app published at `https://play.joamgames.com` as an installable, online-first PWA (v0.7, ADR-014) served by AWS Amplify Hosting, backed by one API Gateway HTTP API and one Lambda with DynamoDB (games, sessions, family player profiles). AI-generated games use a two-model Claude Sonnet 4.6 Generator/Validator pipeline on Amazon Bedrock with age-aware personalization (v0.6) and the v0.7.1 quality and execution-budget hardening. v0.8 adds on-demand spoken questions through Amazon Polly and optional curated question images, both stored in one private S3 bucket and delivered through short-lived signed URLs (ADR-016, ADR-017). v0.9 adds real-time multiplayer rooms: each family member plays from their own device, joining with a short room code; an API Gateway WebSocket API served by the same Lambda keeps every device in sync, and the backend alone decides timing, correctness, scoring and the podium (ADR-018, ADR-019, ADR-020).
 
 AI generation is **disabled by default**. Enabling it is an intentional deployment decision.
 
@@ -12,17 +12,18 @@ GitHub
 AWS Amplify Hosting
     ↓ HTTPS
 Next.js UI
-    ↓ HTTPS / JSON
-GameApiClient
-    ↓
-API Gateway HTTP API
-    ↓
-One Lambda router
-    ↓
+    ├── HTTPS / JSON → GameApiClient → API Gateway HTTP API ─────────┐
+    └── WSS (v0.9)   → MultiplayerSocketClient → API Gateway WebSocket API ─┤
+                                                                     ↓
+                                            One Lambda (family-learning-games-backend)
+                                               ├── HTTP router      └── WebSocket router (v0.9)
+                                                                     ↓
 Application / Domain
     ├── GameGenerator port → BedrockGameGenerator → Amazon Bedrock
     ├── SpeechSynthesizer port → PollySpeechSynthesizer → Amazon Polly   (v0.8)
     ├── MediaObjectStore port → S3MediaObjectStore → private S3 media bucket (v0.8)
+    ├── MultiplayerRepository port → DynamoDbMultiplayerRepository → Multiplayer table (v0.9, TTL)
+    ├── MultiplayerBroadcaster port → ApiGatewayWebSocketBroadcaster → postToConnection (v0.9)
     └── Repository ports → DynamoDB repositories → Games + GameSessions + Players
 ```
 
@@ -57,6 +58,7 @@ Tests use injected clients and do not call live AWS services. `npm run build` pr
 | `generationThrottleBurstLimit` | `2` | Burst limit for `POST /games/generate`. |
 | `audioCacheVersion` | `v1` | Part of the audio cache key; bump it to invalidate cached audio after a voice/prosody policy change. |
 | `audioCacheExpirationDays` | `30` | Lifecycle expiration for the derived `audio-cache/` prefix only. |
+| `multiplayerMaxPlayers` | `8` | v0.9 room capacity (integer 2–8). The minimum to start is always 2. |
 
 Boolean context values accept only `true` or `false`. Throttle values must be positive, and the burst limit must be an integer. Each origin must be an `http://` or `https://` URL with no trailing slash; the stack never accepts `*` as an origin.
 Choose one `<region>` for the deployment and repeat `-c deploymentRegion=<region>` on every CDK lifecycle command. Omitting it targets the default `us-east-1`, regardless of the AWS profile's configured region.
@@ -69,7 +71,7 @@ Only `POST /games/generate` is throttled at the API stage. A `429` response is s
 
 ## Manual deployment
 
-Replace `<aws-profile>` before copying these examples. The commands below are operational instructions; **none were executed against a real AWS account while documenting v0.5–v0.8**.
+Replace `<aws-profile>` before copying these examples. The commands below are operational instructions; **none were executed against a real AWS account while documenting v0.5–v0.9**.
 
 ```bash
 # Verify the target account and configured region first.
@@ -109,10 +111,11 @@ npx cdk bootstrap --profile <aws-profile> \
   -c deploymentRegion=<region>
 ```
 
-Deployment outputs include `ApiUrl`, `FunctionName`, `GamesTableName`, and `GameSessionsTableName`. Configure the frontend and restart or rebuild Next.js:
+Deployment outputs include `ApiUrl`, `MultiplayerWebSocketUrl`, `FunctionName`, `GamesTableName`, `GameSessionsTableName`, `PlayersTableName`, `MultiplayerTableName`, and `MediaBucketName`. Configure the frontend and restart or rebuild Next.js:
 
 ```dotenv
 NEXT_PUBLIC_GAME_API_BASE_URL=https://your-api-id.execute-api.your-region.amazonaws.com
+NEXT_PUBLIC_MULTIPLAYER_WEBSOCKET_URL=wss://your-websocket-api-id.execute-api.your-region.amazonaws.com/production
 ```
 
 ## Public frontend hosting (AWS Amplify)
@@ -151,9 +154,10 @@ AWS Console
 
 ```text
 NEXT_PUBLIC_GAME_API_BASE_URL=<ApiUrl from the CDK deployment output>
+NEXT_PUBLIC_MULTIPLAYER_WEBSOCKET_URL=<MultiplayerWebSocketUrl from the CDK deployment output>   # v0.9
 ```
 
-Do not add any `AWS_*`, Bedrock, or GitHub credential to Amplify's environment variables. Every `NEXT_PUBLIC_*` value is publicly visible in the browser bundle; only the public API base URL belongs there.
+Do not add any `AWS_*`, Bedrock, or GitHub credential to Amplify's environment variables. Every `NEXT_PUBLIC_*` value is publicly visible in the browser bundle; only the public API base URL and the public WebSocket URL belong there.
 
 ### Resolving the CORS ↔ Amplify domain order
 
@@ -222,6 +226,38 @@ The request accepts identifiers only; any body field (`text`, `ssml`, `voiceId`,
 
 **Cost.** New usage-based charges: Polly characters synthesized (cache misses only), S3 storage and GET/PUT/HEAD requests. No always-on compute and no image-generation inference.
 
+## Multiplayer (v0.9)
+
+See `docs/architecture/ARCHITECTURE-v0.9.md`, `REQUIREMENTS-v0.9.md`, `ADR-018`, `ADR-019` and `ADR-020`. Home → **Multijugador** → *Crear sala* (profile → game/difficulty → time limit) or *Unirse a una sala* (code → profile) → lobby → synchronized questions → reveal + live scoreboard → final podium. Single-player is unchanged.
+
+**HTTP bootstrap** (existing HTTP API, same Lambda; standard `{"error":{code,message}}` envelope):
+
+```bash
+curl -X POST "${API_URL}/multiplayer/rooms" -H 'content-type: application/json' \
+  -d '{"gameId":"animals","playerId":"<playerId>","questionTimeLimitSeconds":30,"difficulty":"easy"}'
+# 201 → {"roomId","roomCode":"AB7K2M","playerId","role":"HOST","participantToken","questionTimeLimitSeconds":30}
+curl -X POST "${API_URL}/multiplayer/rooms/AB7K2M/join" -H 'content-type: application/json' -d '{"playerId":"<playerId>"}'
+# 201 → {"roomId","roomCode","playerId","role":"PLAYER","participantToken"}
+```
+
+`questionTimeLimitSeconds` defaults to 30 (10–120). `difficulty` is optional and selects which of the game's difficulties is played (seeded games carry three; AI games one); the room snapshots up to 10 question IDs in persisted order. Errors: `400 INVALID_REQUEST`, `404 RESOURCE_NOT_FOUND` (game) / `PLAYER_NOT_FOUND` / `ROOM_NOT_FOUND`, `409 ROOM_ALREADY_STARTED` / `ROOM_FULL` / `PLAYER_ALREADY_JOINED`, `410 ROOM_EXPIRED`, `503 MULTIPLAYER_DISABLED` (no multiplayer table configured).
+
+**WebSocket** (`MultiplayerWebSocketUrl`, route selection `$request.body.action`). `$connect` only checks the `Origin` header against `allowedOrigins`. The first message must be `{"action":"IDENTIFY","roomCode","playerId","participantToken"}`; until then every command is rejected with `NOT_IDENTIFIED`. Commands: `START_GAME` and `NEXT_QUESTION` (host only), `SUBMIT_ANSWER` (`payload: {questionId, answerId}`), `QUESTION_TIMEOUT` (a trigger; the server re-checks its own deadline), `SYNC_ROOM`. Events: `ROOM_STATE`, `PLAYER_JOINED`, `PLAYER_DISCONNECTED`, `GAME_STARTED`, `QUESTION_OPENED`, `ANSWER_ACCEPTED`, `QUESTION_REVEALED`, `SCOREBOARD_UPDATED`, `GAME_FINISHED`, `ERROR`; each carries `type`, `roomId`, `serverTime`, and state events a monotonic `version` plus a full safe room snapshot. `isCorrect`/`correctAnswerId` appear only after the question is `REVEALED`.
+
+**Rules.** Room `WAITING → IN_PROGRESS → FINISHED` (expired rooms are rejected from `expiresAt`, not only by TTL); question `NOT_STARTED → OPEN → REVEALED`. A question closes when every player present at its opening answered or the server deadline passed; disconnecting never closes it early. One answer per player/question (first wins). Correct answers score `1000 + 300/200/100/0` by server receive order among correct answers only (a fast wrong answer scores 0 and takes no placement); correct answers within 100 ms share a placement and its bonus, using competition ranking (`1, 1, 3`). Ranking (live and final): correct answers ↓, points ↓, 1st/2nd/3rd-place finishes ↓, cumulative correct response time ↑; full equality is a tie. The last reveal finishes the room in the same atomic write (no `NEXT_QUESTION` needed) and sends `GAME_FINISHED` with the podium.
+
+**Timeout.** When a client's server-estimated time reaches `questionDeadlineAt`, it automatically sends `QUESTION_TIMEOUT` once per question (re-sent every 3 s only while the question stays `OPEN`). The backend reveals only if `serverNow >= questionDeadlineAt` and the question is `OPEN`. An early timeout is rejected, leaves the question `OPEN` and scores nothing. An overdue `OPEN` question is also closed by the next `IDENTIFY`/reconnect, `SYNC_ROOM`, `SUBMIT_ANSWER`, `QUESTION_TIMEOUT` or `NEXT_QUESTION`. All of these go through the single atomic reveal/scoring path, so concurrent recoveries reveal and score once. *Accepted limitation:* API Gateway WebSocket and Lambda are event-driven. If every connected client disappears and no backend invocation occurs after the deadline, the question stays `OPEN` until new activity reaches the backend. No scheduler, Step Functions, cron or polling is used.
+
+**Membership.** No accounts or Cognito. Create/join returns a 256-bit opaque `participantToken` once; the backend stores only its SHA-256 and compares in constant time. The browser keeps it in `sessionStorage` for that tab only (refresh/reconnect), sends it only inside `IDENTIFY` (never in the URL), and the latest identified connection of a member replaces the previous one. Reconnecting keeps role, score, answers and progress. *Accepted limitation:* reconnection works only while the token is still in the tab's session storage. If the browser/PWA session is fully terminated and the token is lost, the existing membership cannot be securely reclaimed, because player profiles are not authenticated identities. There is no recovery by `roomCode + playerId`, no token recovery and no login. Tokens, their hashes and player names are never logged; connection IDs and room codes appear only as hashes.
+
+**Infrastructure.** One `AWS::ApiGatewayV2::Api` (WEBSOCKET) with stage `production` and routes `$connect`, `$disconnect`, `$default`, `IDENTIFY`, `START_GAME`, `SUBMIT_ANSWER`, `QUESTION_TIMEOUT`, `NEXT_QUESTION`, `SYNC_ROOM`, all integrated with the existing backend Lambda. One DynamoDB table `<environment>-family-learning-games-multiplayer` (PK/SK, on-demand, TTL on `expiresAt`, 2 h room lifetime) with items `CODE#<code>/RESERVATION`, `ROOM#<id>/META`, `ROOM#<id>/PLAYER#<playerId>`, `ROOM#<id>/ANSWER#<questionId>#<playerId>`, `CONNECTION#<connectionId>/META`; the reservation item makes room codes unique and resolvable without a GSI or scan. Concurrency invariants (code reservation, membership, one answer, one start, one reveal + scoring) are DynamoDB transactions/conditional writes. New Lambda permissions: `GetItem/PutItem/UpdateItem/DeleteItem/Query` on that table only, and `execute-api:ManageConnections` on `<websocket-api>/production/POST/@connections/*` only. New Lambda environment: `MULTIPLAYER_TABLE_NAME`, `MULTIPLAYER_MAX_PLAYERS`, `MULTIPLAYER_ROOM_TTL_MINUTES`, `MULTIPLAYER_PLACEMENT_TIE_WINDOW_MS`, `MULTIPLAYER_ALLOWED_ORIGINS` (from `allowedOrigins`), `WEBSOCKET_CALLBACK_ENDPOINT`. No Cognito, AppSync, Redis, scheduler, Step Functions or second Lambda.
+
+**PWA.** Unchanged (ADR-014): multiplayer is online only; the Service Worker never sees WebSocket traffic and caches no room state, API responses or tokens.
+
+**Cost.** New usage-based charges: API Gateway WebSocket connection minutes and messages, extra Lambda invocations per WebSocket message, and DynamoDB on-demand reads/writes for the multiplayer table. No always-on compute.
+
+**Deploying v0.9.** Redeploy the backend with the same `allowedOrigins` as before (they also gate the WebSocket `$connect`), then set `NEXT_PUBLIC_MULTIPLAYER_WEBSOCKET_URL` in Amplify to the `MultiplayerWebSocketUrl` output and redeploy the frontend. Existing tables and the media bucket are preserved; no reseed is needed.
+
 ## Generated-game API flow
 
 Generate exactly ten questions:
@@ -264,6 +300,7 @@ DynamoDB table names follow:
 <environment>-family-learning-games-games
 <environment>-family-learning-games-game-sessions
 <environment>-family-learning-games-players
+<environment>-family-learning-games-multiplayer   # v0.9, ephemeral (TTL)
 ```
 
 Seed the standard games after the first deploy or any destroy/redeploy:
@@ -312,6 +349,8 @@ The development tables use `RemovalPolicy.DESTROY`. Destroying the stack permane
 ## Scope
 
 v0.4 does not add authentication, API keys, usage plans, family profiles, generated media, queues, multiplayer, or a production multi-environment platform. Route throttling is basic protection, not an identity boundary.
+
+v0.9 adds only family multiplayer rooms over an API Gateway WebSocket API served by the existing Lambda, with one TTL-backed DynamoDB table. It does not add Cognito/login/accounts, AppSync/GraphQL, Redis, containers, a scheduler or Step Functions, public matchmaking, spectators, host migration, mid-game joining, offline multiplayer, persistent leaderboards, or new game types.
 
 v0.8 adds only on-demand Polly question audio and controlled curated images in one private S3 bucket. It does not add AI image generation, uploads, external image URLs, speech recognition, SSML, streaming audio, queues/workflows, a CDN, a second Lambda/API, or a new DynamoDB table.
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createRuntimeRouter } from "./lambda.ts";
+import { createRuntime, createRuntimeRouter, toWebSocketRequest } from "./lambda.ts";
 
 const baseEnvironment = {
   GAMES_TABLE_NAME: "Games",
@@ -183,4 +183,46 @@ test("v0.8 media wiring: audio endpoint uses the configured bucket, Polly voice 
   }]);
   assert.deepEqual(s3Commands.map((command) => command.constructor.name), ["HeadObjectCommand", "PutObjectCommand"]);
   assert.equal(s3Commands.every((command) => command.input.Bucket === "media-bucket" && /^audio-cache\/v1\/[a-f0-9]{64}\.mp3$/.test(command.input.Key ?? "")), true);
+});
+
+const multiplayerEnvironment = {
+  ...baseEnvironment,
+  MULTIPLAYER_TABLE_NAME: "Multiplayer",
+  WEBSOCKET_CALLBACK_ENDPOINT: "https://ws.example.com/production",
+  MULTIPLAYER_ALLOWED_ORIGINS: "http://localhost:3000,https://play.example.com",
+};
+
+test("v0.9 multiplayer is disabled without a multiplayer table and never builds a Management API client", () => {
+  let clients = 0;
+  const runtime = createRuntime({ environment: baseEnvironment, documentClient, createManagementApiClient: () => { clients += 1; return { send: async () => ({}) }; } });
+  assert.equal(runtime.websocket, undefined);
+  assert.equal(clients, 0);
+});
+
+test("v0.9 multiplayer requires its callback endpoint and allowed origins, and validates capacity", () => {
+  for (const missing of ["WEBSOCKET_CALLBACK_ENDPOINT", "MULTIPLAYER_ALLOWED_ORIGINS"] as const) {
+    const environment: Record<string, string> = { ...multiplayerEnvironment };
+    delete environment[missing];
+    assert.throws(() => createRuntime({ environment, documentClient, createManagementApiClient: () => ({ send: async () => ({}) }) }), new RegExp(missing));
+  }
+  assert.throws(
+    () => createRuntime({ environment: { ...multiplayerEnvironment, MULTIPLAYER_MAX_PLAYERS: "20" }, documentClient, createManagementApiClient: () => ({ send: async () => ({}) }) }),
+    /MULTIPLAYER_MAX_PLAYERS/,
+  );
+  const endpoints: string[] = [];
+  const runtime = createRuntime({ environment: multiplayerEnvironment, documentClient, createManagementApiClient: (endpoint) => { endpoints.push(endpoint); return { send: async () => ({}) }; } });
+  assert.ok(runtime.websocket);
+  assert.deepEqual(endpoints, ["https://ws.example.com/production"]);
+});
+
+test("the same handler entry point routes WebSocket $connect by Origin (case-insensitive header)", async () => {
+  const runtime = createRuntime({ environment: multiplayerEnvironment, documentClient, createManagementApiClient: () => ({ send: async () => ({}) }) });
+  const event = (origin: string) => ({
+    headers: { Origin: origin },
+    isBase64Encoded: false,
+    requestContext: { connectionId: "c-1", eventType: "CONNECT", requestId: "r-1", routeKey: "$connect" },
+  }) as unknown as Parameters<typeof toWebSocketRequest>[0];
+  assert.deepEqual(toWebSocketRequest(event("https://play.example.com")), { eventType: "CONNECT", connectionId: "c-1", requestId: "r-1", origin: "https://play.example.com", body: undefined });
+  assert.equal((await runtime.websocket!(toWebSocketRequest(event("https://play.example.com")))).statusCode, 200);
+  assert.equal((await runtime.websocket!(toWebSocketRequest(event("https://evil.example.com")))).statusCode, 403);
 });

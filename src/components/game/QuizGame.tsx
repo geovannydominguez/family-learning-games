@@ -6,6 +6,8 @@ import type { AnswerFeedback, GameSetupResponse, PublicGame, PublicGameSession }
 import type { Category, Difficulty } from "@/domain/game/types";
 import type { Player } from "@/domain/player/types";
 import { createGameApiClient } from "@/infrastructure/http/GameApiClient";
+import { MultiplayerGame } from "../multiplayer/MultiplayerGame";
+import { loadMultiplayerSession } from "../multiplayer/multiplayerRoomState";
 import { QuestionAudioButton, QuestionImageView } from "./QuestionMedia";
 import { buildStartSessionCommand, createdGameDifficulty, gameUiErrorMessage, selectCreatedGames } from "./gameUiState";
 
@@ -19,7 +21,7 @@ interface PlayerFormState {
 
 const closedPlayerForm: PlayerFormState = { open: false, mode: "create", name: "", age: "" };
 
-type FlowStep = "home" | "player" | "category" | "difficulty" | "generate" | "game";
+type FlowStep = "home" | "player" | "category" | "difficulty" | "generate" | "game" | "multiplayer";
 
 const difficultyOptions: Array<{ id: Difficulty; label: string; icon: string; description: string }> = [
   { id: "easy", label: "Fácil", icon: "🌱", description: "Para empezar con calma" },
@@ -92,6 +94,8 @@ export function QuizGame() {
 
   useEffect(() => { void loadSetup(); }, [loadSetup]);
   useEffect(() => { void loadPlayers(); }, [loadPlayers]);
+  // v0.9: a refresh during a multiplayer room returns to it (session-scoped membership only).
+  useEffect(() => { if (loadMultiplayerSession()) setStep("multiplayer"); }, []);
   useEffect(() => {
     if (step === "category") void loadCreatedGames();
   }, [step, loadCreatedGames]);
@@ -296,11 +300,16 @@ export function QuizGame() {
           <span className="text-7xl" aria-hidden="true">🎲</span>
           <h1 id="welcome-title" className="mt-5 text-4xl font-black tracking-tight text-slate-900 sm:text-6xl">Family Learning Games</h1>
           <p className="mx-auto mt-5 max-w-2xl text-xl leading-relaxed text-slate-700 sm:text-2xl">Aprendamos, juguemos y descubramos cosas nuevas en familia.</p>
-          <button className="button-primary mt-9 min-w-56" onClick={() => setStep("player")} type="button">Comenzar</button>
+          <div className="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
+            <button className="button-primary min-w-56" onClick={() => setStep("player")} type="button">Comenzar</button>
+            <button className="button-secondary min-w-56" onClick={() => { setError(null); setStep("multiplayer"); }} type="button">👨‍👩‍👧 Multijugador</button>
+          </div>
         </section>
       </main>
     );
   }
+
+  if (step === "multiplayer") return <MultiplayerGame players={players} onExit={() => setStep("home")} />;
 
   if (step === "player") return (
     <SelectionLayout headingRef={headingRef} eyebrow="Paso 1 de 3" title="¿Quién va a jugar?" description="Elige un perfil familiar o crea uno nuevo." error={error} onBack={() => setStep("home")}>
