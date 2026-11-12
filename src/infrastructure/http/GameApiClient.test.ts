@@ -211,3 +211,26 @@ test("v0.9 multiplayer bootstrap posts to the room routes and surfaces safe erro
   assert.equal(requests[1].input, "https://api.example.com/multiplayer/rooms/AB7K2M/join");
   assert.deepEqual(JSON.parse(String(requests[1].init?.body)), { playerId: "beto" });
 });
+
+test("v0.9.2: a 429 outside AI generation is a generic REQUEST_THROTTLED error, never retried", async () => {
+  let calls = 0;
+  const client = new GameApiClient("https://api.example.com", async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ message: "Too Many Requests" }), { status: 429 });
+  });
+  for (const call of [() => client.listPlayers(), () => client.joinMultiplayerRoom("AB7K2M", "ana"), () => client.getQuestionAudio("g", "q")]) {
+    await assert.rejects(call(), (error: unknown) => error instanceof GameApiError
+      && error.code === "REQUEST_THROTTLED"
+      && error.status === 429
+      && !/generation/i.test(error.message));
+  }
+  assert.equal(calls, 3);
+
+  const generation = new GameApiClient("https://api.example.com", async () => new Response(JSON.stringify({ message: "Too Many Requests" }), { status: 429 }));
+  await assert.rejects(
+    generation.generateGame({ topic: "animals", difficulty: "easy", questionCount: 10, playerId: "amelia" }),
+    (error: unknown) => error instanceof GameApiError && error.code === "RATE_LIMITED" && error.message === "Too many generation requests. Try again later.",
+  );
+  const nonJson = new GameApiClient("https://api.example.com", async () => new Response("Too Many Requests", { status: 429 }));
+  await assert.rejects(nonJson.listGames(), (error: unknown) => error instanceof GameApiError && error.code === "REQUEST_THROTTLED");
+});

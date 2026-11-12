@@ -9,6 +9,10 @@ import type { MultiplayerClientAction, MultiplayerServerEvent } from "../../appl
  *   the socket opens, never in the URL.
  * - On an unexpected close it reconnects with bounded backoff and identifies
  *   again; the server then replies with the authoritative ROOM_STATE.
+ * - v0.9.2: a frame without `type` but with a `message` is an API Gateway or
+ *   Lambda error for one of our messages (throttling, integration failure).
+ *   It cannot be correlated to a requestId, so it is reported through
+ *   `onTransportError` instead of being dropped; nothing is resent here.
  */
 
 export interface MultiplayerIdentity {
@@ -18,6 +22,11 @@ export interface MultiplayerIdentity {
 }
 
 export type MultiplayerConnectionStatus = "connecting" | "connected" | "reconnecting" | "closed";
+
+/** v0.9.2: a gateway-level failure of some message we sent (never carries our requestId). */
+export interface MultiplayerTransportError {
+  kind: "throttled" | "server-error" | "unknown";
+}
 
 export interface SocketLike {
   readonly readyState: number;
@@ -34,6 +43,7 @@ export interface MultiplayerSocketClientOptions {
   identity: MultiplayerIdentity;
   onEvent: (event: MultiplayerServerEvent) => void;
   onStatus: (status: MultiplayerConnectionStatus) => void;
+  onTransportError?: (error: MultiplayerTransportError) => void;
   createSocket?: (url: string) => SocketLike;
   setTimer?: (callback: () => void, delayMs: number) => unknown;
   clearTimer?: (timer: unknown) => void;
@@ -101,12 +111,16 @@ export class MultiplayerSocketClient {
     };
     socket.onmessage = (message) => {
       if (this.socket !== socket || typeof message.data !== "string") return;
+      let frame: unknown;
       try {
-        const event = JSON.parse(message.data) as MultiplayerServerEvent;
-        if (event && typeof event === "object" && typeof event.type === "string") this.options.onEvent(event);
+        frame = JSON.parse(message.data);
       } catch {
-        // Ignore malformed frames; the next authoritative event or SYNC_ROOM repairs state.
+        return; // Ignore malformed frames; the next authoritative event or SYNC_ROOM repairs state.
       }
+      if (!frame || typeof frame !== "object") return;
+      const record = frame as Record<string, unknown>;
+      if (typeof record.type === "string") this.options.onEvent(frame as MultiplayerServerEvent);
+      else if (typeof record.message === "string") this.options.onTransportError?.({ kind: classifyTransportError(record.message) });
     };
     socket.onerror = () => {};
     socket.onclose = () => {
@@ -125,6 +139,13 @@ export class MultiplayerSocketClient {
       if (!this.closedByClient) this.open("reconnecting");
     }, delay);
   }
+}
+
+/** API Gateway answers e.g. `{"message":"Too Many Requests",...}` or `{"message":"Internal server error",...}`. */
+export function classifyTransportError(message: string): MultiplayerTransportError["kind"] {
+  if (/too many requests|limit exceeded|throttl|rate exceeded/i.test(message)) return "throttled";
+  if (/internal server error|bad gateway|service unavailable|timed? ?out/i.test(message)) return "server-error";
+  return "unknown";
 }
 
 /** Public, non-secret configuration (like NEXT_PUBLIC_GAME_API_BASE_URL). */

@@ -54,8 +54,10 @@ Tests use injected clients and do not call live AWS services. `npm run build` pr
 | `bedrockGeneratorModelId` | `global.anthropic.claude-sonnet-4-6` | Generator model (ADR-015), used only when AI is enabled. |
 | `bedrockValidatorModelId` | `global.anthropic.claude-sonnet-4-6` | Independent validator model (ADR-011/ADR-015), used only when AI is enabled. |
 | `deploymentRegion` | `us-east-1` | Region for the complete stack, including Bedrock Runtime, its model ARN, and the Guardrail. |
-| `generationThrottleRateLimit` | `1` | Rate limit for `POST /games/generate`, in requests/second. |
-| `generationThrottleBurstLimit` | `2` | Burst limit for `POST /games/generate`. |
+| `generationThrottleRateLimit` | `0.1` | Rate limit for `POST /games/generate`, in requests/second (fractions allowed; v0.9.2, was `1`). |
+| `generationThrottleBurstLimit` | `1` | Burst limit for `POST /games/generate` (v0.9.2, was `2`). |
+| `rateLimits` | (defaults in `infra/lib/rateLimits.ts`) | v0.9.2: optional partial JSON override of the HTTP stage/route throttles, the WebSocket stage throttle and the DynamoDB maximum on-demand throughput. |
+| `tableDeletionProtection` | `true` | v0.9.2: `RemovalPolicy.RETAIN` plus DynamoDB deletion protection on the four tables. `false` only for disposable stacks. |
 | `audioCacheVersion` | `v1` | Part of the audio cache key; bump it to invalidate cached audio after a voice/prosody policy change. |
 | `audioCacheExpirationDays` | `30` | Lifecycle expiration for the derived `audio-cache/` prefix only. |
 | `multiplayerMaxPlayers` | `8` | v0.9 room capacity (integer 2–8). The minimum to start is always 2. |
@@ -67,7 +69,7 @@ When AI is enabled, CDK provisions one family-safe Bedrock Guardrail and one pub
 
 Generated candidates enforce these additional metadata limits before persistence: category ID 80 characters, category name 100, category description 300, category icon 16, question ID 80, answer ID 80, emoji 16, and image reference 2048. Every supplied field is trimmed and must remain non-empty; the existing title/question/answer limits remain 100/240/120.
 
-Only `POST /games/generate` is throttled at the API stage. A `429` response is shown as a friendly retry-later message; the client and UI NEVER perform aggressive or automatic retries.
+Since v0.9.2 (Infrastructure Rate Limits) the HTTP `$default` stage has a default throttle (10 rps / burst 20) with route overrides for `POST /games/generate` (0.1 / 1), question audio (2 / 10), room creation (1 / 5) and room join (2 / 10). The WebSocket `production` stage is throttled at 20 messages/s (burst 40), and each DynamoDB table has a maximum on-demand throughput. These bound rates, not spending, and are aggregate rather than per client. A `429` is shown as a friendly retry-later message (game-creation specific only for generation); the client and UI NEVER perform aggressive or automatic retries. No Lambda reserved concurrency is configured: the account quota (10) does not allow it. See `docs/security/infrastructure-rate-limits-v0.9.2.md`.
 
 ## Manual deployment
 
@@ -91,8 +93,8 @@ npx cdk diff FamilyLearningGamesBackendStack \
   -c bedrockGeneratorModelId=global.anthropic.claude-sonnet-4-6 \
   -c bedrockValidatorModelId=global.anthropic.claude-sonnet-4-6 \
   -c deploymentRegion=<region> \
-  -c generationThrottleRateLimit=1 \
-  -c generationThrottleBurstLimit=2
+  -c generationThrottleRateLimit=0.1 \
+  -c generationThrottleBurstLimit=1
 
 npx cdk deploy FamilyLearningGamesBackendStack \
   --profile <aws-profile> \
@@ -100,8 +102,8 @@ npx cdk deploy FamilyLearningGamesBackendStack \
   -c bedrockGeneratorModelId=global.anthropic.claude-sonnet-4-6 \
   -c bedrockValidatorModelId=global.anthropic.claude-sonnet-4-6 \
   -c deploymentRegion=<region> \
-  -c generationThrottleRateLimit=1 \
-  -c generationThrottleBurstLimit=2
+  -c generationThrottleRateLimit=0.1 \
+  -c generationThrottleBurstLimit=1
 ```
 
 For a first deployment in an account/region:

@@ -3,20 +3,20 @@
 import { useCallback, useEffect, useReducer, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import type { PublicGame } from "@/application/game/gameSessionContracts";
-import type { MultiplayerClientAction, MultiplayerServerEvent, ScoreboardEntry } from "@/application/multiplayer/contracts";
+import type { MultiplayerClientAction, ScoreboardEntry } from "@/application/multiplayer/contracts";
 import type { Difficulty } from "@/domain/game/types";
 import type { Player } from "@/domain/player/types";
 import { createGameApiClient } from "@/infrastructure/http/GameApiClient";
 import { MultiplayerSocketClient, readMultiplayerSocketUrl, type MultiplayerConnectionStatus } from "@/infrastructure/websocket/MultiplayerSocketClient";
 import { QuestionAudioButton, QuestionImageView } from "../game/QuestionMedia";
 import {
-  applyServerEvent,
   clearMultiplayerSession,
   initialMultiplayerViewState,
   isTerminalMultiplayerError,
   loadMultiplayerSession,
   multiplayerErrorMessage,
   questionTimeoutToSend,
+  reduceMultiplayerView,
   remainingSeconds,
   saveMultiplayerSession,
   type StoredMultiplayerSession,
@@ -181,10 +181,7 @@ export function MultiplayerGame({ players, onExit }: { players: Player[] | null;
 }
 
 function useMultiplayerRoom(session: StoredMultiplayerSession) {
-  const [state, dispatch] = useReducer(
-    (current: typeof initialMultiplayerViewState, action: { event: MultiplayerServerEvent; now: number }) => applyServerEvent(current, action.event, action.now),
-    initialMultiplayerViewState,
-  );
+  const [state, dispatch] = useReducer(reduceMultiplayerView, initialMultiplayerViewState);
   const [status, setStatus] = useState<MultiplayerConnectionStatus>("connecting");
   const clientRef = useRef<MultiplayerSocketClient | null>(null);
   const url = readMultiplayerSocketUrl();
@@ -195,8 +192,10 @@ function useMultiplayerRoom(session: StoredMultiplayerSession) {
     const client = new MultiplayerSocketClient({
       url,
       identity: { roomCode, playerId, participantToken },
-      onEvent: (event) => dispatch({ event, now: Date.now() }),
+      onEvent: (event) => dispatch({ kind: "server-event", event, now: Date.now() }),
       onStatus: setStatus,
+      // v0.9.2: API Gateway/Lambda error frames (e.g. throttling) are surfaced, never silently dropped.
+      onTransportError: () => dispatch({ kind: "transport-error", now: Date.now() }),
     });
     clientRef.current = client;
     client.connect();
@@ -217,14 +216,22 @@ function useMultiplayerRoom(session: StoredMultiplayerSession) {
     (action: Exclude<MultiplayerClientAction, "IDENTIFY">, payload?: Record<string, unknown>) => clientRef.current?.send(action, payload) ?? null,
     [],
   );
+  // v0.9.2: the reducer decides (rate-limited) when one SYNC_ROOM is needed.
+  useEffect(() => {
+    if (state.resyncRequests > 0) send("SYNC_ROOM");
+  }, [state.resyncRequests, send]);
+  const markAnswerSent = useCallback(
+    (questionId: string, answerId: string, requestId: string) => dispatch({ kind: "answer-sent", questionId, answerId, requestId, now: Date.now() }),
+    [],
+  );
+  const tick = useCallback((now: number) => dispatch({ kind: "tick", now }), []);
   const stop = useCallback(() => clientRef.current?.close(), []);
-  return { state, status, send, configured: Boolean(url), stop };
+  return { state, status, send, markAnswerSent, tick, configured: Boolean(url), stop };
 }
 
 function MultiplayerRoomView({ session, onLeave }: { session: StoredMultiplayerSession; onLeave: () => void }) {
-  const { state, status, send, configured, stop } = useMultiplayerRoom(session);
+  const { state, status, send, markAnswerSent, tick, configured, stop } = useMultiplayerRoom(session);
   const [now, setNow] = useState(() => Date.now());
-  const [pendingAnswer, setPendingAnswer] = useState<{ questionId: string; answerId: string } | null>(null);
   const timeoutSentRef = useRef<{ questionId: string; at: number } | null>(null);
   const { room, self } = state;
   const question = room?.currentQuestion;
@@ -240,6 +247,13 @@ function MultiplayerRoomView({ session, onLeave }: { session: StoredMultiplayerS
   }, [open]);
 
   const secondsLeft = remainingSeconds(room, state.clockOffsetMs, now);
+  // v0.9.2: confirmation timeout for an unconfirmed answer (one SYNC_ROOM, then unlock).
+  const hasPendingAnswer = state.pendingAnswer !== null;
+  useEffect(() => {
+    if (!hasPendingAnswer) return;
+    const timer = setInterval(() => tick(Date.now()), 500);
+    return () => clearInterval(timer);
+  }, [hasPendingAnswer, tick]);
   // Automatic (no click): the countdown only *triggers* QUESTION_TIMEOUT; the server re-checks its own deadline.
   useEffect(() => {
     const questionId = questionTimeoutToSend(room, state.clockOffsetMs, now, timeoutSentRef.current);
@@ -253,10 +267,13 @@ function MultiplayerRoomView({ session, onLeave }: { session: StoredMultiplayerS
   const isHost = self.role === "HOST";
   const errorText = state.error ? multiplayerErrorMessage(state.error, "") : "";
   const header = (
-    <div className="flex flex-wrap items-center justify-between gap-3 text-sm font-bold text-slate-600 sm:text-base">
-      <span>Sala <strong className="tracking-widest text-violet-800">{room.roomCode}</strong> · {room.gameTitle}</span>
-      <ConnectionBadge status={status} />
-    </div>
+    <>
+      <div className="flex flex-wrap items-center justify-between gap-3 text-sm font-bold text-slate-600 sm:text-base">
+        <span>Sala <strong className="tracking-widest text-violet-800">{room.roomCode}</strong> · {room.gameTitle}</span>
+        <ConnectionBadge status={status} />
+      </div>
+      {state.notice && <p className="mt-3 rounded-2xl bg-amber-100 p-3 text-center font-bold text-amber-900" role="status">{state.notice.message}</p>}
+    </>
   );
 
   if (room.status === "FINISHED") {
@@ -306,12 +323,16 @@ function MultiplayerRoomView({ session, onLeave }: { session: StoredMultiplayerS
   if (!question) return <Notice title="Sincronizando…" description="Esperando la pregunta actual." busy onLeave={onLeave} />;
 
   const revealed = room.questionState === "REVEALED" && room.reveal?.questionId === question.id ? room.reveal : undefined;
-  const myAnswerId = state.answeredQuestionId === question.id ? state.myAnswerId : pendingAnswer?.questionId === question.id ? pendingAnswer.answerId : null;
+  // v0.9.2: only a server confirmation counts as "sent"; a pending answer just locks the options.
+  const confirmedAnswerId = state.answeredQuestionId === question.id ? state.myAnswerId : null;
+  const pendingAnswerId = !confirmedAnswerId && state.pendingAnswer?.questionId === question.id ? state.pendingAnswer.answerId : null;
+  const myAnswerId = confirmedAnswerId ?? pendingAnswerId;
   const myResult = revealed?.results.find((result) => result.playerId === self.playerId);
 
   function answer(answerId: string) {
     if (!question || myAnswerId || revealed) return;
-    if (send("SUBMIT_ANSWER", { questionId: question.id, answerId })) setPendingAnswer({ questionId: question.id, answerId });
+    const requestId = send("SUBMIT_ANSWER", { questionId: question.id, answerId });
+    if (requestId) markAnswerSent(question.id, answerId, requestId);
   }
 
   return (
@@ -337,7 +358,8 @@ function MultiplayerRoomView({ session, onLeave }: { session: StoredMultiplayerS
       <div className="mt-6 min-h-16" aria-live="polite">
         {revealed
           ? <p className={`rounded-2xl p-4 text-lg font-bold ${myResult?.isCorrect ? "bg-emerald-100 text-emerald-900" : "bg-slate-100 text-slate-800"}`}>{myResult?.isCorrect ? `¡Correcto! +${myResult.pointsAwarded} puntos${myResult.placement && myResult.placement <= 3 ? ` (${myResult.placement}.º en acertar)` : ""}` : myResult?.answered ? "Esta vez no. +0 puntos" : "Sin respuesta. +0 puntos"}</p>
-          : myAnswerId ? <p className="rounded-2xl bg-violet-50 p-4 text-lg font-bold text-violet-900">Respuesta enviada 🔒 Esperando a los demás…</p> : null}
+          : confirmedAnswerId ? <p className="rounded-2xl bg-violet-50 p-4 text-lg font-bold text-violet-900">Respuesta enviada 🔒 Esperando a los demás…</p>
+          : pendingAnswerId ? <p className="rounded-2xl bg-slate-100 p-4 text-lg font-bold text-slate-700">Enviando respuesta…</p> : null}
         {errorText && <p className="mt-3 rounded-2xl bg-rose-100 p-4 font-bold text-rose-900" role="alert">{errorText}</p>}
       </div>
       {revealed && isHost && <button type="button" className="button-primary mt-2 w-full" disabled={status !== "connected"} onClick={() => send("NEXT_QUESTION")}>Siguiente pregunta</button>}

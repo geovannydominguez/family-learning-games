@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { MultiplayerServerEvent } from "../../application/multiplayer/contracts.ts";
-import { MultiplayerSocketClient, type MultiplayerConnectionStatus, type SocketLike } from "./MultiplayerSocketClient.ts";
+import { classifyTransportError, MultiplayerSocketClient, type MultiplayerConnectionStatus, type MultiplayerTransportError, type SocketLike } from "./MultiplayerSocketClient.ts";
 
 class FakeSocket implements SocketLike {
   readyState = 0;
@@ -25,18 +25,20 @@ function setup() {
   const timers: Array<{ callback: () => void; delayMs: number }> = [];
   const statuses: MultiplayerConnectionStatus[] = [];
   const events: MultiplayerServerEvent[] = [];
+  const transportErrors: MultiplayerTransportError[] = [];
   let sequence = 0;
   const client = new MultiplayerSocketClient({
     url: "wss://ws.example.com/production",
     identity: { roomCode: "AB7K2M", playerId: "ana", participantToken: "secret-token" },
     onEvent: (event) => events.push(event),
     onStatus: (status) => statuses.push(status),
+    onTransportError: (error) => transportErrors.push(error),
     createSocket: (url) => { const socket = new FakeSocket(url); sockets.push(socket); return socket; },
     setTimer: (callback, delayMs) => { timers.push({ callback, delayMs }); return timers.length; },
     clearTimer: () => {},
     createRequestId: () => `req-${++sequence}`,
   });
-  return { client, sockets, timers, statuses, events };
+  return { client, sockets, timers, statuses, events, transportErrors };
 }
 
 test("identifies with the token in the first message, never in the URL", () => {
@@ -88,4 +90,31 @@ test("close() stops for good: no reconnect after leaving", () => {
   assert.equal(sockets[0].closed, true);
   assert.equal(timers.length, 0);
   assert.equal(statuses.at(-1), "closed");
+});
+
+test("v0.9.2: API Gateway/Lambda error frames are reported, not dropped, and nothing is resent", () => {
+  const { client, sockets, events, transportErrors } = setup();
+  client.connect();
+  sockets[0].open();
+  client.send("SUBMIT_ANSWER", { questionId: "q1", answerId: "a1" });
+  const sentBefore = sockets[0].sent.length;
+  sockets[0].onmessage?.({ data: JSON.stringify({ message: "Too Many Requests", connectionId: "c", requestId: "gw-1" }) });
+  sockets[0].onmessage?.({ data: JSON.stringify({ message: "Internal server error", connectionId: "c", requestId: "gw-2" }) });
+  sockets[0].onmessage?.({ data: JSON.stringify({ message: "Forbidden" }) });
+  sockets[0].onmessage?.({ data: JSON.stringify({ unexpected: true }) });
+  assert.deepEqual(transportErrors, [{ kind: "throttled" }, { kind: "server-error" }, { kind: "unknown" }]);
+  assert.equal(events.length, 0, "gateway frames are not server events");
+  assert.equal(sockets[0].sent.length, sentBefore, "no automatic resend");
+  // A typed server event that happens to carry a message is still a server event.
+  sockets[0].onmessage?.({ data: JSON.stringify({ type: "ERROR", serverTime: 1, error: { code: "X", message: "y" }, message: "z" }) });
+  assert.equal(events.length, 1);
+  assert.equal(transportErrors.length, 3);
+});
+
+test("v0.9.2: transport error classification", () => {
+  assert.equal(classifyTransportError("Too Many Requests"), "throttled");
+  assert.equal(classifyTransportError("Rate exceeded"), "throttled");
+  assert.equal(classifyTransportError("Internal server error"), "server-error");
+  assert.equal(classifyTransportError("Endpoint request timed out"), "server-error");
+  assert.equal(classifyTransportError("Forbidden"), "unknown");
 });

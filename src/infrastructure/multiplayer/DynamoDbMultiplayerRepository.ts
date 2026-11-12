@@ -17,6 +17,23 @@ interface DocumentClient {
 
 type Item = Record<string, unknown>;
 
+export interface DynamoDbMultiplayerRepositoryOptions {
+  /** Retries after a transiently cancelled transaction (default 2, so at most 3 attempts). */
+  maxTransientRetries?: number;
+  /** Injected for tests. */
+  sleep?: (delayMs: number) => Promise<void>;
+  random?: () => number;
+}
+
+/**
+ * v0.9.2: cancellation reasons that mean "nothing was applied, try again"
+ * rather than a business conflict. A concurrent transaction on the same room
+ * item (e.g. several answers landing together) yields `TransactionConflict`;
+ * on-demand maximum throughput yields `ThrottlingError`.
+ */
+const transientCancellationCodes = new Set(["TransactionConflict", "ThrottlingError", "ProvisionedThroughputExceeded", "RequestLimitExceeded"]);
+const transientRetryBaseDelayMs = 25;
+
 const roomPk = (roomId: string) => `ROOM#${roomId}`;
 const codePk = (roomCode: string) => `CODE#${roomCode}`;
 const connectionPk = (connectionId: string) => `CONNECTION#${connectionId}`;
@@ -47,15 +64,21 @@ const scoreFields: ReadonlyArray<keyof MultiplayerScore> = [
 export class DynamoDbMultiplayerRepository implements MultiplayerRepository {
   private readonly client: DocumentClient;
   private readonly tableName: string;
+  private readonly maxTransientRetries: number;
+  private readonly sleep: (delayMs: number) => Promise<void>;
+  private readonly random: () => number;
 
-  constructor(client: DocumentClient, tableName: string) {
+  constructor(client: DocumentClient, tableName: string, options: DynamoDbMultiplayerRepositoryOptions = {}) {
     this.client = client;
     this.tableName = tableName;
+    this.maxTransientRetries = options.maxTransientRetries ?? 2;
+    this.sleep = options.sleep ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
+    this.random = options.random ?? Math.random;
   }
 
   async createRoom(room: MultiplayerRoom, host: MultiplayerMember, nowMs: number): Promise<boolean> {
     try {
-      await this.client.send(new TransactWriteCommand({
+      await this.transact(new TransactWriteCommand({
         TransactItems: [
           {
             Put: {
@@ -99,7 +122,7 @@ export class DynamoDbMultiplayerRepository implements MultiplayerRepository {
 
   async addMember(member: MultiplayerMember, limits: { maxPlayers: number; nowMs: number }): Promise<boolean> {
     try {
-      await this.client.send(new TransactWriteCommand({
+      await this.transact(new TransactWriteCommand({
         TransactItems: [
           {
             Update: {
@@ -141,7 +164,7 @@ export class DynamoDbMultiplayerRepository implements MultiplayerRepository {
 
   async recordAnswer(answer: MultiplayerAnswer, questionIndex: number, nowMs: number): Promise<RecordAnswerOutcome> {
     try {
-      await this.client.send(new TransactWriteCommand({
+      await this.transact(new TransactWriteCommand({
         TransactItems: [
           {
             Put: {
@@ -179,7 +202,7 @@ export class DynamoDbMultiplayerRepository implements MultiplayerRepository {
 
   async revealQuestion(input: Parameters<MultiplayerRepository["revealQuestion"]>[0]): Promise<boolean> {
     try {
-      await this.client.send(new TransactWriteCommand({
+      await this.transact(new TransactWriteCommand({
         TransactItems: [
           {
             Update: {
@@ -221,7 +244,7 @@ export class DynamoDbMultiplayerRepository implements MultiplayerRepository {
 
   async bindConnection(binding: Parameters<MultiplayerRepository["bindConnection"]>[0]): Promise<void> {
     try {
-      await this.client.send(new TransactWriteCommand({
+      await this.transact(new TransactWriteCommand({
         TransactItems: [
           {
             Update: {
@@ -281,6 +304,24 @@ export class DynamoDbMultiplayerRepository implements MultiplayerRepository {
     } catch (error) {
       if (isConditionalFailure(error)) return { ...binding, wasActive: false };
       throw new PersistenceError("release-multiplayer-connection", error, binding.roomId);
+    }
+  }
+
+  /**
+   * Sends one transaction, retrying (bounded, with jittered backoff) only when
+   * it was cancelled for transient reasons and no condition failed. A cancelled
+   * transaction applies nothing and its conditions are re-evaluated on retry, so
+   * exactly-once guarantees (one answer, one reveal, one membership) still hold.
+   * Anything else, including the last transient failure, is rethrown unchanged.
+   */
+  private async transact(command: TransactWriteCommand): Promise<unknown> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.client.send(command);
+      } catch (error) {
+        if (attempt >= this.maxTransientRetries || !isTransientCancellation(error)) throw error;
+        await this.sleep(transientRetryBaseDelayMs * 2 ** attempt + Math.floor(this.random() * transientRetryBaseDelayMs));
+      }
     }
   }
 
@@ -423,6 +464,14 @@ function readNumber(item: Item, key: string): number {
 
 function isConditionalFailure(error: unknown): boolean {
   return !!error && typeof error === "object" && "name" in error && error.name === "ConditionalCheckFailedException";
+}
+
+function isTransientCancellation(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("name" in error) || error.name !== "TransactionCanceledException") return false;
+  const codes = ((error as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons ?? [])
+    .map((reason) => reason.Code ?? "None")
+    .filter((code) => code !== "None");
+  return codes.length > 0 && codes.every((code) => transientCancellationCodes.has(code));
 }
 
 /** Per-item cancellation codes of a conditionally cancelled transaction; `null` for any other failure. */

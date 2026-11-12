@@ -218,7 +218,7 @@ These risks require independent backend controls.
 | API type | HTTP API |
 | Region | us-east-1 |
 | Authorization | No authorizers configured |
-| Custom throttling | Not configured |
+| Custom throttling | Not configured at stage level (see erratum below) |
 
 ### 6.2 Findings
 
@@ -229,6 +229,8 @@ For example, the route `GET /games` was verified with no authorizer configured.
 The lack of an API Gateway authorizer means that access is not restricted at this layer. Any application-level checks must be evaluated separately.
 
 No application-specific throttling configuration had been established at the time of this assessment.
+
+> **Erratum (v0.9.2, 2026-11-12).** The deployed `$default` stage already had a route-level throttle on `POST /games/generate` (1 request/second, burst 2), defined in CDK since v0.4 (`generationThrottleRateLimit` / `generationThrottleBurstLimit`). It was verified with `aws apigatewayv2 get-stage` during the v0.9.2 prerequisites. No stage-level default throttle and no other route throttle existed. The v0.9.1 controls and conclusions are otherwise unchanged; v0.9.2 throttling is documented in `infrastructure-rate-limits-v0.9.2.md`.
 
 ### 6.3 Risks
 

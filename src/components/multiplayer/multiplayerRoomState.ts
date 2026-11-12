@@ -23,6 +23,36 @@ export interface MultiplayerViewState {
   /** serverTime − local time, from the latest event: countdowns render from server time. */
   clockOffsetMs: number;
   error: { code: string; message: string } | null;
+  /**
+   * v0.9.2: an answer this device sent that the server has not confirmed yet.
+   * It locks the options while pending, but is never shown as accepted.
+   */
+  pendingAnswer: PendingAnswer | null;
+  /** v0.9.2: client-side informational message (not a server error). */
+  notice: MultiplayerNotice | null;
+  /** Bumped when one SYNC_ROOM should be sent; the component sends it. */
+  resyncRequests: number;
+  lastResyncAtMs: number | null;
+}
+
+/**
+ * `questionId` binds an answer notice to the question it is about; it is
+ * `null` for connection notices. Answer notices are cleared as soon as that
+ * question's answer is confirmed, another question is current, or the game is
+ * no longer in progress (never shown on the podium).
+ */
+export interface MultiplayerNotice {
+  message: string;
+  questionId: string | null;
+}
+
+export interface PendingAnswer {
+  questionId: string;
+  answerId: string;
+  requestId: string;
+  sentAtMs: number;
+  /** When a SYNC_ROOM was requested to confirm this answer: at most once per answer. */
+  resyncRequestedAtMs: number | null;
 }
 
 export const initialMultiplayerViewState: MultiplayerViewState = {
@@ -34,7 +64,121 @@ export const initialMultiplayerViewState: MultiplayerViewState = {
   podium: null,
   clockOffsetMs: 0,
   error: null,
+  pendingAnswer: null,
+  notice: null,
+  resyncRequests: 0,
+  lastResyncAtMs: null,
 };
+
+/** v0.9.2: wait this long for ANSWER_ACCEPTED before asking for one SYNC_ROOM, and as long again before giving up. */
+export const ANSWER_CONFIRMATION_TIMEOUT_MS = 5_000;
+/** v0.9.2: never request SYNC_ROOM more often than this (it must not amplify traffic under throttling). */
+export const RESYNC_MIN_INTERVAL_MS = 5_000;
+
+export const multiplayerNotices = {
+  checkingAnswer: "Comprobando tu respuesta con el servidor…",
+  answerUnconfirmed: "No pudimos confirmar tu respuesta. Puedes elegirla de nuevo.",
+  answerNotRecorded: "Tu respuesta no se registró antes de que cerrara la pregunta.",
+  serverBusy: "El servidor está ocupado. Sincronizando la partida…",
+} as const;
+
+export type MultiplayerViewAction =
+  | { kind: "server-event"; event: MultiplayerServerEvent; now: number }
+  | { kind: "answer-sent"; questionId: string; answerId: string; requestId: string; now: number }
+  | { kind: "transport-error"; now: number }
+  | { kind: "tick"; now: number };
+
+/**
+ * v0.9.2 reducer around `applyServerEvent`: tracks the unconfirmed answer and
+ * decides when to request a single SYNC_ROOM. It never resends SUBMIT_ANSWER:
+ * the player chooses again only after the server state shows no answer.
+ */
+export function reduceMultiplayerView(state: MultiplayerViewState, action: MultiplayerViewAction): MultiplayerViewState {
+  switch (action.kind) {
+    case "server-event":
+      return clearStaleAnswerNotice(resolvePendingAnswer(state, applyServerEvent(state, action.event, action.now), action.event, action.now));
+    case "answer-sent":
+      return {
+        ...state,
+        // A new answer supersedes earlier answer notices; connection notices stay.
+        notice: state.notice?.questionId === null ? state.notice : null,
+        pendingAnswer: { questionId: action.questionId, answerId: action.answerId, requestId: action.requestId, sentAtMs: action.now, resyncRequestedAtMs: null },
+      };
+    case "transport-error": {
+      const pending = state.pendingAnswer;
+      if (pending && pending.resyncRequestedAtMs === null) {
+        return requestResync({ ...state, notice: answerNotice("checkingAnswer", pending.questionId), pendingAnswer: { ...pending, resyncRequestedAtMs: action.now } }, action.now);
+      }
+      return requestResync({ ...state, notice: pending ? state.notice : { message: multiplayerNotices.serverBusy, questionId: null } }, action.now);
+    }
+    case "tick": {
+      const pending = state.pendingAnswer;
+      if (!pending) return state;
+      if (pending.resyncRequestedAtMs === null) {
+        if (action.now - pending.sentAtMs < ANSWER_CONFIRMATION_TIMEOUT_MS) return state;
+        return requestResync({ ...state, notice: answerNotice("checkingAnswer", pending.questionId), pendingAnswer: { ...pending, resyncRequestedAtMs: action.now } }, action.now);
+      }
+      if (action.now - pending.resyncRequestedAtMs < ANSWER_CONFIRMATION_TIMEOUT_MS) return state;
+      // The SYNC_ROOM reply never came either: unlock instead of waiting forever.
+      return { ...state, pendingAnswer: null, notice: answerNotice("answerUnconfirmed", pending.questionId) };
+    }
+  }
+}
+
+function answerNotice(kind: "checkingAnswer" | "answerUnconfirmed" | "answerNotRecorded", questionId: string): MultiplayerNotice {
+  return { message: multiplayerNotices[kind], questionId };
+}
+
+function requestResync(state: MultiplayerViewState, now: number): MultiplayerViewState {
+  if (state.lastResyncAtMs !== null && now - state.lastResyncAtMs < RESYNC_MIN_INTERVAL_MS) return state;
+  return { ...state, resyncRequests: state.resyncRequests + 1, lastResyncAtMs: now };
+}
+
+function resolvePendingAnswer(previous: MultiplayerViewState, next: MultiplayerViewState, event: MultiplayerServerEvent, now: number): MultiplayerViewState {
+  // Only an own snapshot that was actually applied is authoritative: an older,
+  // out-of-order ROOM_STATE (ignored by applyServerEvent) must not unlock anything.
+  const ownSnapshot = event.type === "ROOM_STATE" && event.self !== undefined && event.version >= previous.version;
+  const settled = ownSnapshot && next.notice?.message === multiplayerNotices.serverBusy ? { ...next, notice: null } : next;
+  const pending = settled.pendingAnswer;
+  if (!pending) return settled;
+  const clearChecking = settled.notice?.message === multiplayerNotices.checkingAnswer ? null : settled.notice;
+
+  // Confirmed by the server (ANSWER_ACCEPTED for this device, or own ROOM_STATE.self.currentAnswerId).
+  if (settled.answeredQuestionId === pending.questionId && settled.myAnswerId) {
+    return { ...settled, pendingAnswer: null, notice: clearChecking };
+  }
+  if (event.type === "ERROR" && event.requestId === pending.requestId) {
+    const cleared = { ...settled, pendingAnswer: null, notice: clearChecking };
+    // The server already holds an answer from this player: fetch which one.
+    return event.error.code === "ANSWER_ALREADY_SUBMITTED" ? requestResync(cleared, now) : cleared;
+  }
+  const room = settled.room;
+  if (room && (room.currentQuestion?.id !== pending.questionId || room.questionState !== "OPEN")) {
+    const result = room.reveal?.questionId === pending.questionId
+      ? room.reveal.results.find((candidate) => candidate.playerId === settled.self?.playerId)
+      : undefined;
+    return { ...settled, pendingAnswer: null, notice: result && !result.answered ? answerNotice("answerNotRecorded", pending.questionId) : clearChecking };
+  }
+  if (ownSnapshot && pending.resyncRequestedAtMs !== null) {
+    // The authoritative snapshot we asked for shows no answer from this player.
+    return { ...settled, pendingAnswer: null, notice: answerNotice("answerUnconfirmed", pending.questionId) };
+  }
+  return settled;
+}
+
+/**
+ * Runs after every server event, with or without a pending answer (the
+ * v0.9.2 pre-production defect: answer notices outlived their question).
+ * Connection notices (`questionId: null`) and server errors are untouched.
+ */
+function clearStaleAnswerNotice(state: MultiplayerViewState): MultiplayerViewState {
+  const notice = state.notice;
+  if (!notice || notice.questionId === null || !state.room) return state;
+  const confirmed = state.answeredQuestionId === notice.questionId && state.myAnswerId !== null;
+  const otherQuestion = state.room.currentQuestion?.id !== notice.questionId;
+  const notPlaying = state.room.status !== "IN_PROGRESS";
+  return confirmed || otherQuestion || notPlaying ? { ...state, notice: null } : state;
+}
 
 export function applyServerEvent(state: MultiplayerViewState, event: MultiplayerServerEvent, localNowMs: number): MultiplayerViewState {
   const next: MultiplayerViewState = { ...state, clockOffsetMs: event.serverTime - localNowMs };
@@ -174,6 +318,8 @@ export function multiplayerErrorMessage(error: unknown, fallback: string): strin
     case "ANSWER_DEADLINE_EXPIRED": return "Se acabó el tiempo para esta pregunta.";
     case "MULTIPLAYER_DISABLED": return "El modo multijugador no está disponible en este momento.";
     case "NETWORK_ERROR": return "No pudimos conectar con el servicio. Revisa tu conexión e inténtalo otra vez.";
+    case "RATE_LIMITED":
+    case "REQUEST_THROTTLED": return "Hay muchas solicitudes en este momento. Espera unos segundos e inténtalo otra vez.";
     default: return fallback;
   }
 }

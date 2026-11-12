@@ -42,10 +42,16 @@ export function buildCreatedGameSessionCommand(playerId: string, game: PublicGam
   return buildStartSessionCommand(playerId, game.category.id, createdGameDifficulty(game), game.id);
 }
 
+/** v0.9.2: generic copy for API Gateway throttling outside AI generation. */
+export const throttledRequestMessage = "Hay muchas solicitudes en este momento. Espera unos segundos e inténtalo otra vez.";
+
 export function gameUiErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof GameApiError) {
-    if (error.code === "RATE_LIMITED" || error.status === 429) {
+    if (error.code === "RATE_LIMITED") {
       return "Muchas familias están creando juegos ahora. Espera un momento e inténtalo nuevamente.";
+    }
+    if (error.code === "REQUEST_THROTTLED" || error.status === 429) {
+      return throttledRequestMessage;
     }
     if (error.code === "AI_GENERATION_DISABLED") {
       return "La creación de juegos nuevos no está disponible en este momento.";

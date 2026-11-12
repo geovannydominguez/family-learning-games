@@ -171,3 +171,53 @@ test("bindConnection replaces the member connection and reverse lookup; releaseC
   const unknown = new DynamoDbMultiplayerRepository({ send: async () => ({}) }, "Multiplayer");
   assert.equal(await unknown.releaseConnection("missing"), null);
 });
+
+// ---- v0.9.2: bounded retry for transiently cancelled transactions -------------------
+
+const answerFixture = { roomId: "room-1", questionId: "q1", playerId: "ana", answerId: "a1", serverReceivedAtMs: 5_000, responseDurationMs: 4_000, isCorrect: true, expiresAt: 8_000 };
+
+function scriptedRepository(...outcomes: Array<Error | "ok">) {
+  let calls = 0;
+  const delays: number[] = [];
+  const repository = new DynamoDbMultiplayerRepository({
+    send: async () => {
+      const outcome = outcomes[Math.min(calls, outcomes.length - 1)];
+      calls += 1;
+      if (outcome !== "ok") throw outcome;
+      return {};
+    },
+  }, "Multiplayer", { sleep: async (delayMs) => { delays.push(delayMs); }, random: () => 0 });
+  return { repository, calls: () => calls, delays };
+}
+
+test("a transaction cancelled only by TransactionConflict/ThrottlingError is retried (bounded) and conditions re-evaluated", async () => {
+  const conflict = scriptedRepository(cancelled("None", "TransactionConflict"), "ok");
+  assert.equal(await conflict.repository.recordAnswer(answerFixture, 0, 5_000), "accepted");
+  assert.equal(conflict.calls(), 2);
+  assert.deepEqual(conflict.delays, [25]);
+
+  // After the retry the condition check is authoritative: a duplicate stays a duplicate.
+  const thenDuplicate = scriptedRepository(cancelled("ThrottlingError", "None"), cancelled("ConditionalCheckFailed", "None"));
+  assert.equal(await thenDuplicate.repository.recordAnswer(answerFixture, 0, 5_000), "duplicate");
+  assert.equal(thenDuplicate.calls(), 2);
+});
+
+test("persistent transient cancellations stop after three attempts and surface as PersistenceError", async () => {
+  const throttled = scriptedRepository(cancelled("ThrottlingError", "ThrottlingError"));
+  await assert.rejects(throttled.repository.recordAnswer(answerFixture, 0, 5_000), (error) => error instanceof PersistenceError && error.originalErrorName === "TransactionCanceledException");
+  assert.equal(throttled.calls(), 3);
+  assert.deepEqual(throttled.delays, [25, 50]);
+});
+
+test("business conflicts and non-transaction errors are never retried", async () => {
+  // A condition failure mixed with throttling is still a business outcome.
+  const mixed = scriptedRepository(cancelled("ConditionalCheckFailed", "ThrottlingError"));
+  assert.equal(await mixed.repository.recordAnswer(answerFixture, 0, 5_000), "duplicate");
+  assert.equal(mixed.calls(), 1);
+  const validation = scriptedRepository(cancelled("ValidationError"));
+  await assert.rejects(validation.repository.recordAnswer(answerFixture, 0, 5_000), PersistenceError);
+  assert.equal(validation.calls(), 1);
+  const plain = scriptedRepository(Object.assign(new Error("slow"), { name: "ProvisionedThroughputExceededException" }));
+  await assert.rejects(plain.repository.createRoom(room, host, 2_500), PersistenceError);
+  assert.equal(plain.calls(), 1, "single-item throttling is left to the SDK's own retry policy");
+});

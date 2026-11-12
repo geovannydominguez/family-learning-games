@@ -14,6 +14,8 @@ import { Effect, PolicyStatement } from "aws-cdk-lib/aws-iam";
 import { BlockPublicAccess, Bucket, BucketEncryption, HttpMethods, ObjectOwnership } from "aws-cdk-lib/aws-s3";
 import type { Construct } from "constructs";
 
+import { defaultGenerationThrottle, httpRouteThrottleKeys, readRateLimits, type TableThroughputLimit, type ThrottleLimit } from "./rateLimits.ts";
+
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const defaultBedrockModelId = "global.anthropic.claude-sonnet-4-6";
 // v0.8 — ADR-017: one fixed speech profile (Spanish, es-US). Not configurable per deploy.
@@ -32,6 +34,8 @@ export interface FamilyLearningGamesBackendStackProps extends StackProps {
   generationThrottleRateLimit?: number;
   generationThrottleBurstLimit?: number;
   allowedOrigins?: string[];
+  /** v0.9.2: RETAIN + DynamoDB deletion protection on the four tables (default true). */
+  tableDeletionProtection?: boolean;
 }
 
 export class FamilyLearningGamesBackendStack extends Stack {
@@ -56,26 +60,42 @@ export class FamilyLearningGamesBackendStack extends Stack {
     const bedrockValidatorModelId = props?.bedrockValidatorModelId
       ?? readStringContext(this.node.tryGetContext("bedrockValidatorModelId"), defaultBedrockModelId);
     const generationThrottleRateLimit = readPositiveNumber(
-      props?.generationThrottleRateLimit ?? this.node.tryGetContext("generationThrottleRateLimit") ?? 1,
+      props?.generationThrottleRateLimit ?? this.node.tryGetContext("generationThrottleRateLimit") ?? defaultGenerationThrottle.rateLimit,
       "generationThrottleRateLimit",
     );
     const generationThrottleBurstLimit = readPositiveNumber(
-      props?.generationThrottleBurstLimit ?? this.node.tryGetContext("generationThrottleBurstLimit") ?? 2,
+      props?.generationThrottleBurstLimit ?? this.node.tryGetContext("generationThrottleBurstLimit") ?? defaultGenerationThrottle.burstLimit,
       "generationThrottleBurstLimit",
       true,
     );
+    // v0.9.2 — Infrastructure Rate Limits: API Gateway throttling and DynamoDB
+    // on-demand maximum throughput (see ./rateLimits.ts and
+    // docs/security/infrastructure-rate-limits-v0.9.2.md). Not a spending cap.
+    const rateLimits = readRateLimits(this.node.tryGetContext("rateLimits"));
+    // v0.9.2 data protection: the stack is the only copy of family data (no PITR,
+    // no backups). RETAIN keeps a table if CloudFormation would delete it (stack
+    // deletion, logical-ID change); deletion protection makes DeleteTable fail for
+    // any caller. Both are in-place changes; names, keys and billing mode are unchanged.
+    const tableDeletionProtection = props?.tableDeletionProtection
+      ?? readBooleanContext(this.node.tryGetContext("tableDeletionProtection"), "tableDeletionProtection", true);
+    const tableProtection = (limit: TableThroughputLimit) => ({
+      removalPolicy: tableDeletionProtection ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY,
+      deletionProtection: tableDeletionProtection,
+      maxReadRequestUnits: limit.maxReadRequestUnits,
+      maxWriteRequestUnits: limit.maxWriteRequestUnits,
+    });
     const resourcePrefix = `${environment}-family-learning-games`;
     const gamesTable = new Table(this, "GamesTable", {
       tableName: `${resourcePrefix}-games`,
       partitionKey: { name: "gameId", type: AttributeType.STRING },
       billingMode: BillingMode.PAY_PER_REQUEST,
-      removalPolicy: RemovalPolicy.DESTROY,
+      ...tableProtection(rateLimits.tables.games),
     });
     const gameSessionsTable = new Table(this, "GameSessionsTable", {
       tableName: `${resourcePrefix}-game-sessions`,
       partitionKey: { name: "sessionId", type: AttributeType.STRING },
       billingMode: BillingMode.PAY_PER_REQUEST,
-      removalPolicy: RemovalPolicy.DESTROY,
+      ...tableProtection(rateLimits.tables.gameSessions),
     });
     // v0.6 — ADR-012: persistent family player profiles. Family-scale volume,
     // so no GSI (a Scan backs `GET /players`, see architecture doc).
@@ -83,7 +103,7 @@ export class FamilyLearningGamesBackendStack extends Stack {
       tableName: `${resourcePrefix}-players`,
       partitionKey: { name: "playerId", type: AttributeType.STRING },
       billingMode: BillingMode.PAY_PER_REQUEST,
-      removalPolicy: RemovalPolicy.DESTROY,
+      ...tableProtection(rateLimits.tables.players),
     });
     // v0.8 — ADR-016: one private media bucket. Development stacks (the default
     // `environment=dev`) are destroyed and redeployed cleanly like the tables, so
@@ -125,7 +145,7 @@ export class FamilyLearningGamesBackendStack extends Stack {
       sortKey: { name: "SK", type: AttributeType.STRING },
       billingMode: BillingMode.PAY_PER_REQUEST,
       timeToLiveAttribute: "expiresAt",
-      removalPolicy: RemovalPolicy.DESTROY,
+      ...tableProtection(rateLimits.tables.multiplayer),
     });
     // v0.9 — ADR-018: WebSocket API for real-time multiplayer, served by the same backend Lambda.
     const webSocketApi = new WebSocketApi(this, "MultiplayerWebSocketApi", {
@@ -136,6 +156,8 @@ export class FamilyLearningGamesBackendStack extends Stack {
       webSocketApi,
       stageName: multiplayerWebSocketStageName,
       autoDeploy: true,
+      // v0.9.2: stage-wide message throttling (every route, including $connect).
+      throttle: { rateLimit: rateLimits.webSocket.rateLimit, burstLimit: rateLimits.webSocket.burstLimit },
     });
     const logGroup = new LogGroup(this, "BackendLogs", {
       logGroupName: "/aws/lambda/family-learning-games-backend",
@@ -191,6 +213,10 @@ export class FamilyLearningGamesBackendStack extends Stack {
       backendEnvironment.BEDROCK_GUARDRAIL_VERSION = guardrailVersion.attrVersion;
     }
 
+    // v0.9.2: no reserved concurrency. The regional account quota is 10 concurrent
+    // executions and AWS requires 100 to stay unreserved, so no positive value is
+    // possible. The account quota is the effective cap, shared by HTTP, WebSocket
+    // and AI generation (the generation route throttle limits how much it can hold).
     const backend = new NodejsFunction(this, "BackendFunction", {
       functionName: "family-learning-games-backend",
       entry: path.resolve(currentDirectory, "../../src/interfaces/http/lambda.ts"),
@@ -291,33 +317,51 @@ export class FamilyLearningGamesBackendStack extends Stack {
         allowHeaders: ["content-type"],
       },
     });
-    api.addRoutes({ path: "/game-setup", methods: [HttpMethod.GET], integration });
-    api.addRoutes({ path: "/games", methods: [HttpMethod.GET], integration });
-    api.addRoutes({ path: "/games/{gameId}", methods: [HttpMethod.GET], integration });
-    const [generationRoute] = api.addRoutes({ path: "/games/generate", methods: [HttpMethod.POST], integration });
-    // v0.8 — ADR-017: on-demand question audio. Same HTTP API, same Lambda.
-    api.addRoutes({ path: "/games/{gameId}/questions/{questionId}/audio", methods: [HttpMethod.POST], integration });
-    api.addRoutes({ path: "/game-sessions", methods: [HttpMethod.POST], integration });
-    api.addRoutes({ path: "/game-sessions/{sessionId}/answers", methods: [HttpMethod.POST], integration });
-    api.addRoutes({ path: "/game-sessions/{sessionId}", methods: [HttpMethod.GET], integration });
-    // v0.6 — family player profile CRUD (ADR-012). Same HTTP API, same Lambda.
-    api.addRoutes({ path: "/players", methods: [HttpMethod.GET, HttpMethod.POST], integration });
-    api.addRoutes({ path: "/players/{playerId}", methods: [HttpMethod.PUT, HttpMethod.DELETE], integration });
+    const httpRoutes = [
+      ...api.addRoutes({ path: "/game-setup", methods: [HttpMethod.GET], integration }),
+      ...api.addRoutes({ path: "/games", methods: [HttpMethod.GET], integration }),
+      ...api.addRoutes({ path: "/games/{gameId}", methods: [HttpMethod.GET], integration }),
+      ...api.addRoutes({ path: "/games/generate", methods: [HttpMethod.POST], integration }),
+      // v0.8 — ADR-017: on-demand question audio. Same HTTP API, same Lambda.
+      ...api.addRoutes({ path: "/games/{gameId}/questions/{questionId}/audio", methods: [HttpMethod.POST], integration }),
+      ...api.addRoutes({ path: "/game-sessions", methods: [HttpMethod.POST], integration }),
+      ...api.addRoutes({ path: "/game-sessions/{sessionId}/answers", methods: [HttpMethod.POST], integration }),
+      ...api.addRoutes({ path: "/game-sessions/{sessionId}", methods: [HttpMethod.GET], integration }),
+      // v0.6 — family player profile CRUD (ADR-012). Same HTTP API, same Lambda.
+      ...api.addRoutes({ path: "/players", methods: [HttpMethod.GET, HttpMethod.POST], integration }),
+      ...api.addRoutes({ path: "/players/{playerId}", methods: [HttpMethod.PUT, HttpMethod.DELETE], integration }),
+      // v0.9 multiplayer routes: two HTTP bootstrap routes and the WebSocket routes, all on the same Lambda.
+      ...api.addRoutes({ path: "/multiplayer/rooms", methods: [HttpMethod.POST], integration }),
+      ...api.addRoutes({ path: "/multiplayer/rooms/{roomCode}/join", methods: [HttpMethod.POST], integration }),
+    ];
+    const routesByKey = new Map(httpRoutes.map((route) => {
+      const resource = route.node.defaultChild;
+      if (!(resource instanceof CfnRoute)) throw new Error("HTTP route is unavailable.");
+      return [resource.routeKey, resource] as const;
+    }));
     const defaultStage = api.defaultStage?.node.defaultChild;
     if (!(defaultStage instanceof CfnStage)) throw new Error("HTTP API default stage is unavailable.");
-    const generationRouteResource = generationRoute.node.defaultChild;
-    if (!(generationRouteResource instanceof CfnRoute)) throw new Error("Generation route is unavailable.");
-    defaultStage.addResourceDependency(generationRouteResource);
-    defaultStage.routeSettings = {
-      "POST /games/generate": {
-        ThrottlingRateLimit: generationThrottleRateLimit,
-        ThrottlingBurstLimit: generationThrottleBurstLimit,
-      },
+    // v0.9.2: stage-wide default throttle, then route-level overrides. Every
+    // override must name a real route key; the stage depends on those routes so
+    // CloudFormation never applies RouteSettings for a route that does not exist yet.
+    defaultStage.defaultRouteSettings = {
+      throttlingRateLimit: rateLimits.httpDefault.rateLimit,
+      throttlingBurstLimit: rateLimits.httpDefault.burstLimit,
     };
+    const routeThrottles: Array<[string, ThrottleLimit]> = [
+      ["POST /games/generate", { rateLimit: generationThrottleRateLimit, burstLimit: generationThrottleBurstLimit }],
+      ...(Object.keys(httpRouteThrottleKeys) as Array<keyof typeof httpRouteThrottleKeys>)
+        .map((name) => [httpRouteThrottleKeys[name], rateLimits.httpRoutes[name]] as [string, ThrottleLimit]),
+    ];
+    const routeSettings: Record<string, { ThrottlingRateLimit: number; ThrottlingBurstLimit: number }> = {};
+    for (const [routeKey, limit] of routeThrottles) {
+      const route = routesByKey.get(routeKey);
+      if (!route) throw new Error(`Throttled HTTP route ${routeKey} does not exist.`);
+      defaultStage.addResourceDependency(route);
+      routeSettings[routeKey] = { ThrottlingRateLimit: limit.rateLimit, ThrottlingBurstLimit: limit.burstLimit };
+    }
+    defaultStage.routeSettings = routeSettings;
 
-    // v0.9 multiplayer routes: two HTTP bootstrap routes and the WebSocket routes, all on the same Lambda.
-    api.addRoutes({ path: "/multiplayer/rooms", methods: [HttpMethod.POST], integration });
-    api.addRoutes({ path: "/multiplayer/rooms/{roomCode}/join", methods: [HttpMethod.POST], integration });
     // One WebSocketLambdaIntegration per route: CDK only grants lambda:InvokeFunction (scoped to
     // `*<routeKey>`) the first time an integration instance is bound, so a shared instance would
     // leave every route except the first without invoke permission.

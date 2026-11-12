@@ -39,7 +39,9 @@ test("builds backward-compatible seeded and exact generated session commands", (
 test("maps generation failures to friendly UI messages without provider details", () => {
   const cases: Array<{ error: unknown; expected: RegExp }> = [
     { error: new GameApiError("RATE_LIMITED", "raw", 429), expected: /muchas familias/i },
-    { error: new GameApiError("API_ERROR", "raw", 429), expected: /muchas familias/i },
+    // v0.9.2: only AI generation's RATE_LIMITED mentions game creation; other 429s are generic.
+    { error: new GameApiError("REQUEST_THROTTLED", "raw", 429), expected: /muchas solicitudes/i },
+    { error: new GameApiError("API_ERROR", "raw", 429), expected: /muchas solicitudes/i },
     { error: new GameApiError("AI_GENERATION_DISABLED", "raw", 503), expected: /no está disponible/i },
     { error: new GameApiError("INVALID_GENERATION_REQUEST", "raw", 400), expected: /tema válido/i },
     { error: new GameApiError("AI_GENERATED_CONTENT_INVALID", "raw", 422), expected: /contenido válido/i },

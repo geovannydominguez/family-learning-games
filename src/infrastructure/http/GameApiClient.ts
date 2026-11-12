@@ -133,19 +133,15 @@ export class GameApiClient {
     try {
       body = await response.json();
     } catch {
-      if (response.status === 429) {
-        throw new GameApiError("RATE_LIMITED", "Too many generation requests. Try again later.", 429);
-      }
+      if (response.status === 429) throw throttled(path);
       throw new GameApiError("INVALID_RESPONSE", "The game service returned an invalid response.", response.status);
     }
     if (!response.ok) {
       const envelope = body as ErrorEnvelope;
       if (response.status === 429) {
-        throw new GameApiError(
-          envelope.error?.code ?? "RATE_LIMITED",
-          envelope.error?.message ?? "Too many generation requests. Try again later.",
-          response.status,
-        );
+        // API Gateway throttling answers `{"message":"Too Many Requests"}` (no envelope).
+        if (!envelope.error?.code) throw throttled(path);
+        throw new GameApiError(envelope.error.code, envelope.error.message ?? throttled(path).message, response.status);
       }
       throw new GameApiError(
         envelope.error?.code ?? "API_ERROR",
@@ -155,6 +151,17 @@ export class GameApiClient {
     }
     return body as T;
   }
+}
+
+/**
+ * v0.9.2: a 429 is API Gateway throttling. `POST /games/generate` keeps its
+ * specific `RATE_LIMITED` error; every other route gets the generic
+ * `REQUEST_THROTTLED`. Neither is retried automatically.
+ */
+function throttled(path: string): GameApiError {
+  return path === "/games/generate"
+    ? new GameApiError("RATE_LIMITED", "Too many generation requests. Try again later.", 429)
+    : new GameApiError("REQUEST_THROTTLED", "Too many requests. Try again in a moment.", 429);
 }
 
 export function createGameApiClient(): GameApiClient {
