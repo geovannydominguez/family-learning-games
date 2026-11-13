@@ -17,6 +17,18 @@ export function buildStartSessionCommand(
 }
 
 /**
+ * Audit H1 (AI transparency): a game is AI-generated exactly when its id carries
+ * the `ai-` prefix that `GenerateGameService` assigns. Seeded games use their
+ * category id, so they are never labeled. Unknown/missing ids are not AI games.
+ */
+export function isAiGeneratedGameId(gameId: string | null | undefined): boolean {
+  return typeof gameId === "string" && gameId.startsWith("ai-");
+}
+
+/** Audit H1: notice shown next to the topic field before generating a game. */
+export const aiGenerationNotice = "✨ Este juego se crea con inteligencia artificial. Puede equivocarse. No escribas nombres completos ni datos personales en el tema.";
+
+/**
  * From the full `GET /games` catalog, keep only AI-generated games (id `ai-…`).
  * Seed/base-category games (id === category id) are never included, so they
  * cannot be duplicated in the "Tus juegos creados" section. Returns `[]` for a
@@ -24,7 +36,7 @@ export function buildStartSessionCommand(
  */
 export function selectCreatedGames(games: readonly PublicGame[] | null | undefined): PublicGame[] {
   if (!Array.isArray(games)) return [];
-  return games.filter((game) => typeof game?.id === "string" && game.id.startsWith("ai-"));
+  return games.filter((game) => isAiGeneratedGameId(game?.id));
 }
 
 /** An AI game is generated with a single difficulty; fall back defensively. */

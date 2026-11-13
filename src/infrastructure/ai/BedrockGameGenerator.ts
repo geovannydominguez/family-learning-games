@@ -185,7 +185,7 @@ function distinctIssueCodes(issues: readonly PreviousGenerationIssue[] | undefin
 }
 
 function ageAwarePrompt(targetAge: number): string {
-  const ageInstruction = `Target player age: ${targetAge} years old. Every question must be appropriate for that age. Interpret the requested difficulty relative to the target age.`;
+  const ageInstruction = `Target player age: ${targetAge} years old. Every question must be appropriate for that age. Interpret the requested difficulty relative to the target age. Content must also be emotionally and thematically suitable for that age: do not include explicit violence or death, self-harm, drugs, alcohol, gambling, sexual or disturbing content, or material that would frighten a young child. Calm, non-graphic educational facts about health, safety, prevention, the human body, nature, or history are allowed when they suit the target age.`;
   if (targetAge >= 4 && targetAge <= 6) {
     return `${ageInstruction}\nFor ages 4 through 6, use small, concrete, developmentally appropriate concepts. Do not use powers or exponents, square roots, algebra, advanced fractions, advanced multiplication or division, or obviously age-inappropriate concepts.`;
   }

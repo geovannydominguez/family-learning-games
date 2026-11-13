@@ -310,3 +310,28 @@ test("rejects an empty model id", () => {
 function fullReviewResponse(build: (index: number) => object): object {
   return textResponse(JSON.stringify({ questions: Array.from({ length: 10 }, (_, index) => build(index)) }));
 }
+
+test("H2: AGE_INAPPROPRIATE covers cognitive and thematic suitability, proportional to age", async () => {
+  const commands: unknown[] = [];
+  const validator = new BedrockGameValidator({
+    send: async (command: unknown) => {
+      commands.push(command);
+      return textResponse(fullReview(confidentEntry));
+    },
+  }, { modelId: "amazon.nova-pro-v1:0" });
+
+  await validator.validate(reviewRequest());
+  const system = (commands[0] as { input: { system?: Array<{ text: string }> } }).input.system?.[0].text ?? "";
+
+  for (const rule of [
+    "age appropriateness (AGE_INAPPROPRIATE), judged in proportion to the target age",
+    "requires knowledge clearly too advanced for the target age",
+    "emotionally or thematically unsuitable for that age",
+    "explicit violence or death, self-harm, drugs, alcohol, gambling, sexual or disturbing content",
+    "material that would frighten a young child",
+    "Do NOT report it merely because a question mentions a sensitive word",
+    "health, safety, prevention, the human body, nature, or history is acceptable",
+  ]) assert.ok(system.includes(rule), `missing prompt rule: ${rule}`);
+  // The rule is judged against the target age, which still reaches the reviewer.
+  assert.ok(JSON.stringify(commands[0]).includes("targetAge"));
+});

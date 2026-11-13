@@ -8,6 +8,7 @@ import type { Difficulty } from "@/domain/game/types";
 import type { Player } from "@/domain/player/types";
 import { createGameApiClient } from "@/infrastructure/http/GameApiClient";
 import { MultiplayerSocketClient, readMultiplayerSocketUrl, type MultiplayerConnectionStatus } from "@/infrastructure/websocket/MultiplayerSocketClient";
+import { AiGameBadge } from "../game/AiGameBadge";
 import { QuestionAudioButton, QuestionImageView } from "../game/QuestionMedia";
 import {
   clearMultiplayerSession,
@@ -133,7 +134,7 @@ export function MultiplayerGame({ players, onExit }: { players: Player[] | null;
           {games.map((game) => (
             <div key={game.id} className="selection-card items-stretch text-left">
               <span className="text-5xl" aria-hidden="true">{game.category.icon || "✨"}</span>
-              <span className="mt-3 block text-xl font-black text-slate-900">{game.title}</span>
+              <span className="mt-3 block text-xl font-black text-slate-900">{game.title} <AiGameBadge gameId={game.id} /></span>
               {game.difficulties.length > 1 && (
                 <select aria-label={`Dificultad de ${game.title}`} value={difficultyByGame[game.id] ?? game.difficulties[0]} disabled={submitting} onChange={(event) => setDifficultyByGame((current) => ({ ...current, [game.id]: event.target.value as Difficulty }))} className="mt-3 min-h-11 rounded-xl border-2 border-violet-200 bg-white px-3 font-bold">
                   {game.difficulties.map((difficulty) => <option key={difficulty} value={difficulty}>{difficultyLabels[difficulty]}</option>)}
@@ -269,7 +270,7 @@ function MultiplayerRoomView({ session, onLeave }: { session: StoredMultiplayerS
   const header = (
     <>
       <div className="flex flex-wrap items-center justify-between gap-3 text-sm font-bold text-slate-600 sm:text-base">
-        <span>Sala <strong className="tracking-widest text-violet-800">{room.roomCode}</strong> · {room.gameTitle}</span>
+        <span>Sala <strong className="tracking-widest text-violet-800">{room.roomCode}</strong> · {room.gameTitle} <AiGameBadge gameId={room.gameId} /></span>
         <ConnectionBadge status={status} />
       </div>
       {state.notice && <p className="mt-3 rounded-2xl bg-amber-100 p-3 text-center font-bold text-amber-900" role="status">{state.notice.message}</p>}

@@ -810,3 +810,18 @@ test("sanitizes technical SDK failures without retaining provider details", asyn
     return true;
   });
 });
+
+test("H2: every age gets the thematic suitability rule, without blocking legitimate education", async () => {
+  for (const targetAge of [4, 8, 12, 18]) {
+    const prompt = await systemPromptFor({ targetAge });
+    for (const rule of [
+      "emotionally and thematically suitable for that age",
+      "explicit violence or death, self-harm, drugs, alcohol, gambling, sexual or disturbing content",
+      "material that would frighten a young child",
+      "Calm, non-graphic educational facts about health, safety, prevention, the human body, nature, or history are allowed",
+    ]) assert.ok(prompt.includes(rule), `age ${targetAge} prompt missing: ${rule}`);
+  }
+  // The existing safety line is preserved.
+  const prompt = await systemPromptFor({});
+  assert.ok(prompt.includes("Never produce sexual content, graphic violence, hate or harassment, dangerous instructions, or requests for private personal information."));
+});

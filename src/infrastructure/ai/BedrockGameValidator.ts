@@ -43,7 +43,7 @@ Example: A evolves into B. B evolves into C. If the question asks what A evolves
 Also review each question for:
 - a single correct answer: no second option is also factually correct (MULTIPLE_CORRECT_ANSWERS),
 - ambiguity: interpretation, unstated context, opinion, differing versions, edge cases, insufficient information (AMBIGUOUS_QUESTION),
-- age appropriateness: reject only if it requires knowledge clearly too advanced for the target age (AGE_INAPPROPRIATE),
+- age appropriateness (AGE_INAPPROPRIATE), judged in proportion to the target age. Report it only when (a) the question requires knowledge clearly too advanced for the target age, or (b) its theme or wording is emotionally or thematically unsuitable for that age: explicit violence or death, self-harm, drugs, alcohol, gambling, sexual or disturbing content, or material that would frighten a young child. Do NOT report it merely because a question mentions a sensitive word: a calm, non-graphic educational question about health, safety, prevention, the human body, nature, or history is acceptable when it suits the target age,
 - topic relevance to the requested topic (OFF_TOPIC),
 - factual uncertainty about the answer (FACTUAL_UNCERTAINTY).
 Prefer a false negative over approving a possibly-wrong question.

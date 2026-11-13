@@ -9,7 +9,8 @@ import { createGameApiClient } from "@/infrastructure/http/GameApiClient";
 import { MultiplayerGame } from "../multiplayer/MultiplayerGame";
 import { loadMultiplayerSession } from "../multiplayer/multiplayerRoomState";
 import { QuestionAudioButton, QuestionImageView } from "./QuestionMedia";
-import { buildStartSessionCommand, createdGameDifficulty, gameUiErrorMessage, selectCreatedGames } from "./gameUiState";
+import { AiGameBadge } from "./AiGameBadge";
+import { aiGenerationNotice, buildStartSessionCommand, createdGameDifficulty, gameUiErrorMessage, selectCreatedGames } from "./gameUiState";
 
 interface PlayerFormState {
   open: boolean;
@@ -344,14 +345,15 @@ export function QuizGame() {
     <SelectionLayout headingRef={headingRef} eyebrow={`Jugando como ${selectedPlayer?.name ?? "familia"}`} title="Crea un juego nuevo" description="Elige un tema y una dificultad. El juego tendrá exactamente 10 preguntas." error={error} onBack={() => setStep("category")}>
       <form className="mx-auto max-w-2xl" onSubmit={(event) => void generateGame(event)}>
         <label htmlFor="generation-topic" className="block text-lg font-black text-slate-900">Tema del juego</label>
-        <input id="generation-topic" type="text" required maxLength={80} value={generationTopic} disabled={submitting} onChange={(event) => { setGenerationTopic(event.target.value); setGeneratedGame(null); }} placeholder="Por ejemplo: dinosaurios" className="mt-2 min-h-14 w-full rounded-2xl border-2 border-violet-200 bg-white px-4 text-lg outline-none focus-visible:ring-4 focus-visible:ring-violet-300 disabled:opacity-60" />
+        <input id="generation-topic" type="text" required maxLength={80} value={generationTopic} disabled={submitting} onChange={(event) => { setGenerationTopic(event.target.value); setGeneratedGame(null); }} placeholder="Por ejemplo: dinosaurios" aria-describedby="generation-ai-notice" className="mt-2 min-h-14 w-full rounded-2xl border-2 border-violet-200 bg-white px-4 text-lg outline-none focus-visible:ring-4 focus-visible:ring-violet-300 disabled:opacity-60" />
+        <p id="generation-ai-notice" className="mt-2 rounded-2xl bg-violet-50 p-3 text-base font-bold text-violet-900">{aiGenerationNotice}</p>
         <label htmlFor="generation-difficulty" className="mt-6 block text-lg font-black text-slate-900">Dificultad</label>
         <select id="generation-difficulty" value={generationDifficulty} disabled={submitting} onChange={(event) => { setGenerationDifficulty(event.target.value as Difficulty); setGeneratedGame(null); }} className="mt-2 min-h-14 w-full rounded-2xl border-2 border-violet-200 bg-white px-4 text-lg font-bold outline-none focus-visible:ring-4 focus-visible:ring-violet-300 disabled:opacity-60">
           {difficultyOptions.filter((option) => setup.difficulties.includes(option.id)).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
         </select>
         <button className="button-primary mt-7 w-full" type="submit" disabled={submitting}>{submitting ? "Creando juego…" : "Crear juego"}</button>
       </form>
-      {generatedGame && <section className="mx-auto mt-8 max-w-2xl rounded-3xl bg-emerald-50 p-6 text-center" aria-live="polite"><span className="text-5xl" aria-hidden="true">{generatedGame.category.icon || "✨"}</span><h2 className="mt-3 text-2xl font-black text-slate-900">{generatedGame.title}</h2><p className="mt-2 text-slate-700">Tu juego está listo.</p><button type="button" className="button-primary mt-5" disabled={submitting} onClick={() => void startGame(generationDifficulty, generatedGame.id)}>{submitting ? "Iniciando…" : "Jugar ahora"}</button></section>}
+      {generatedGame && <section className="mx-auto mt-8 max-w-2xl rounded-3xl bg-emerald-50 p-6 text-center" aria-live="polite"><span className="text-5xl" aria-hidden="true">{generatedGame.category.icon || "✨"}</span><h2 className="mt-3 text-2xl font-black text-slate-900">{generatedGame.title} <AiGameBadge gameId={generatedGame.id} /></h2><p className="mt-2 text-slate-700">Tu juego está listo.</p><button type="button" className="button-primary mt-5" disabled={submitting} onClick={() => void startGame(generationDifficulty, generatedGame.id)}>{submitting ? "Iniciando…" : "Jugar ahora"}</button></section>}
     </SelectionLayout>
   );
 
@@ -386,7 +388,7 @@ export function QuizGame() {
     <main className="page-shell py-8 sm:py-12"><div className="mx-auto w-full max-w-3xl">
       <button type="button" onClick={chooseAnotherGame} disabled={submitting} className="inline-flex min-h-11 items-center rounded-xl px-2 font-bold text-violet-800 outline-none hover:bg-white/70 focus-visible:ring-4 focus-visible:ring-violet-300">← Elegir otro juego</button>
       <section className="card mt-4" aria-labelledby="question-title">
-        <p className="mb-4 font-bold text-violet-800">{session.player.avatar} {session.player.name} · {session.category.icon} {session.category.name}</p>
+        <p className="mb-4 font-bold text-violet-800">{session.player.avatar} {session.player.name} · {session.category.icon} {session.category.name} <AiGameBadge gameId={session.gameId} /></p>
         <div className="flex items-center justify-between gap-4 text-sm font-bold text-slate-600 sm:text-base"><span>Pregunta {session.currentQuestionIndex + 1} de {session.totalQuestions}</span><span aria-label={`${displayedScore} respuestas correctas`}>⭐ {displayedScore} puntos</span></div>
         <div className="mt-3 h-3 overflow-hidden rounded-full bg-violet-100" role="progressbar" aria-label="Progreso de la partida" aria-valuemin={1} aria-valuemax={session.totalQuestions} aria-valuenow={session.currentQuestionIndex + 1}><div className="h-full rounded-full bg-violet-600 transition-all" style={{ width: `${progress}%` }} /></div>
         {question.emoji && <span className="mb-4 mt-8 block text-center text-7xl" aria-hidden="true">{question.emoji}</span>}
@@ -508,7 +510,7 @@ function CreatedGamesSection({ games, failed, disabled, onPlay }: { games: Publi
         {created.map((game) => (
           <button key={game.id} type="button" disabled={disabled} onClick={() => onPlay(game)} className="selection-card text-left disabled:cursor-wait disabled:opacity-60">
             <span className="text-5xl" aria-hidden="true">{game.category.icon || "✨"}</span>
-            <span className="mt-3 block text-xl font-black text-slate-900">{game.title}</span>
+            <span className="mt-3 block text-xl font-black text-slate-900">{game.title} <AiGameBadge gameId={game.id} /></span>
             <span className="mt-1 block text-sm font-bold text-slate-500">{game.category.name}{game.difficulties[0] ? ` · ${difficultyLabel(game.difficulties[0])}` : ""}</span>
           </button>
         ))}

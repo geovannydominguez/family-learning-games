@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import type { PublicGame } from "../../application/game/gameSessionContracts.ts";
@@ -7,7 +8,9 @@ import {
   buildCreatedGameSessionCommand,
   buildStartSessionCommand,
   createdGameDifficulty,
+  aiGenerationNotice,
   gameUiErrorMessage,
+  isAiGeneratedGameId,
   selectCreatedGames,
 } from "./gameUiState.ts";
 
@@ -109,4 +112,47 @@ test("buildCreatedGameSessionCommand replays a persisted ai game by its exact ga
   // game's own slug, not one of the base categories.
   assert.equal(command.gameId, game.id);
   assert.equal(["animals", "space", "numbers"].includes(command.categoryId), false);
+});
+
+test("H1: only ai- prefixed games are identified as AI-generated", () => {
+  assert.equal(isAiGeneratedGameId("ai-123e4567"), true);
+  for (const id of ["animals", "space", "pokemon", "pokemon-ai", "AI-123", "", undefined, null]) {
+    assert.equal(isAiGeneratedGameId(id), false, `unexpected AI label for ${String(id)}`);
+  }
+});
+
+test("H1: no seeded game or category is labeled as AI-generated", async () => {
+  const seed = JSON.parse(await readFile(new URL("../../data/games.json", import.meta.url), "utf8")) as {
+    categories: Array<{ id: string }>;
+  };
+  assert.ok(seed.categories.length > 0);
+  for (const category of seed.categories) assert.equal(isAiGeneratedGameId(category.id), false, category.id);
+  // Seeded games keep working: they never enter the "created games" list.
+  const seeded = seed.categories.map((category) => publicGame({ id: category.id }));
+  assert.deepEqual(selectCreatedGames([...seeded, publicGame()]).map((game) => game.id), ["ai-abc"]);
+});
+
+test("H1: generation notice discloses AI, possible errors and asks for no personal data", () => {
+  assert.equal(
+    aiGenerationNotice,
+    "✨ Este juego se crea con inteligencia artificial. Puede equivocarse. No escribas nombres completos ni datos personales en el tema.",
+  );
+});
+
+test("H1: the AI notice and badge are wired into the generation, single-player and multiplayer views", async () => {
+  const quiz = await readFile(new URL("./QuizGame.tsx", import.meta.url), "utf8");
+  const multiplayer = await readFile(new URL("../multiplayer/MultiplayerGame.tsx", import.meta.url), "utf8");
+  // Notice sits next to the topic field, before the submit button, and describes the input.
+  const topicField = quiz.indexOf('id="generation-topic"');
+  const notice = quiz.indexOf("{aiGenerationNotice}");
+  assert.ok(topicField > 0 && notice > topicField && notice < quiz.indexOf("Crear juego\""));
+  assert.ok(quiz.includes('aria-describedby="generation-ai-notice"'));
+  // Badge: generated-game card, created-games list, single-player question screen.
+  for (const usage of ["<AiGameBadge gameId={generatedGame.id} />", "<AiGameBadge gameId={game.id} />", "<AiGameBadge gameId={session.gameId} />"]) {
+    assert.ok(quiz.includes(usage), `QuizGame missing ${usage}`);
+  }
+  // Badge: multiplayer game selection and in-room header.
+  for (const usage of ["<AiGameBadge gameId={game.id} />", "<AiGameBadge gameId={room.gameId} />"]) {
+    assert.ok(multiplayer.includes(usage), `MultiplayerGame missing ${usage}`);
+  }
 });
