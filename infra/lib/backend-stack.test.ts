@@ -805,3 +805,74 @@ test("v0.9.2 keeps the generation route's explicit context keys working (rollbac
   const stage = stageByName(template, "$default") as { Properties: { RouteSettings: Record<string, unknown> } };
   assert.deepEqual(stage.Properties.RouteSettings["POST /games/generate"], { ThrottlingRateLimit: 1, ThrottlingBurstLimit: 2 });
 });
+
+// v0.9.3 — ADR-021: global daily AI generation quota (configuration only; no new resources or IAM).
+function multiplayerTableLogicalId(template: Template): string {
+  const [logicalId] = Object.entries(template.findResources("AWS::DynamoDB::Table"))
+    .find(([, resource]) => resource.Properties.TableName === "dev-family-learning-games-multiplayer") ?? [];
+  assert.ok(logicalId);
+  return logicalId;
+}
+
+function backendVariables(template: Template): Record<string, unknown> {
+  const [backend] = Object.values(template.findResources("AWS::Lambda::Function", { Properties: { FunctionName: "family-learning-games-backend" } }));
+  return backend.Properties.Environment.Variables as Record<string, unknown>;
+}
+
+test("v0.9.3 enabled generation configures the daily quota on the existing multiplayer table (defaults 20 / America/Guayaquil)", () => {
+  const template = Template.fromStack(new FamilyLearningGamesBackendStack(new App({ context: { aiGameGenerationEnabled: true } }), "QuotaStack"));
+  const multiplayerId = multiplayerTableLogicalId(template);
+  const variables = backendVariables(template);
+
+  assert.deepEqual(variables.AI_GENERATION_QUOTA_TABLE_NAME, { Ref: multiplayerId });
+  assert.equal(variables.AI_GENERATION_DAILY_LIMIT, "20");
+  assert.equal(variables.AI_GENERATION_QUOTA_TIMEZONE, "America/Guayaquil");
+  // No new table; the quota item's TTL attribute is the table's real TTL attribute.
+  template.resourceCountIs("AWS::DynamoDB::Table", 4);
+  template.hasResourceProperties("AWS::DynamoDB::Table", {
+    TableName: "dev-family-learning-games-multiplayer",
+    TimeToLiveSpecification: { AttributeName: "expiresAt", Enabled: true },
+  });
+  // IAM unchanged: the one multiplayer-table statement already grants UpdateItem.
+  const statements = Object.values(template.findResources("AWS::IAM::Policy"))
+    .flatMap((policy) => policy.Properties.PolicyDocument.Statement as Array<{ Action: unknown; Resource: unknown }>)
+    .filter((statement) => JSON.stringify(statement.Resource).includes(multiplayerId));
+  assert.equal(statements.length, 1);
+  assert.deepEqual(statements[0].Action, ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query"]);
+});
+
+test("v0.9.3 the quota adds no resources and no IAM compared with a different quota value", () => {
+  const synth = (context: Record<string, unknown>) => Template.fromStack(new FamilyLearningGamesBackendStack(new App({ context: { aiGameGenerationEnabled: true, ...context } }), "Compare")).toJSON();
+  const a = synth({});
+  const b = synth({ aiGenerationDailyLimit: 5, aiGenerationQuotaTimeZone: "America/Bogota" });
+  assert.deepEqual(Object.keys(a.Resources).sort(), Object.keys(b.Resources).sort());
+  const policies = (template: typeof a) => JSON.stringify(Object.values(template.Resources as Record<string, { Type: string }>).filter((resource) => resource.Type === "AWS::IAM::Policy"));
+  assert.equal(policies(a), policies(b));
+});
+
+test("v0.9.3 quota limit and time zone are configurable by context or props, and disabled generation sets no quota variables", () => {
+  const byContext = backendVariables(Template.fromStack(new FamilyLearningGamesBackendStack(
+    new App({ context: { aiGameGenerationEnabled: true, aiGenerationDailyLimit: "0", aiGenerationQuotaTimeZone: "America/Bogota" } }), "QuotaContext")));
+  assert.equal(byContext.AI_GENERATION_DAILY_LIMIT, "0");
+  assert.equal(byContext.AI_GENERATION_QUOTA_TIMEZONE, "America/Bogota");
+  const byProps = backendVariables(Template.fromStack(new FamilyLearningGamesBackendStack(
+    new App(), "QuotaProps", { aiGameGenerationEnabled: true, aiGenerationDailyLimit: 7 })));
+  assert.equal(byProps.AI_GENERATION_DAILY_LIMIT, "7");
+
+  const disabled = backendVariables(Template.fromStack(new FamilyLearningGamesBackendStack(new App(), "QuotaDisabled")));
+  for (const name of ["AI_GENERATION_QUOTA_TABLE_NAME", "AI_GENERATION_DAILY_LIMIT", "AI_GENERATION_QUOTA_TIMEZONE"]) {
+    assert.equal(name in disabled, false, name);
+  }
+});
+
+test("v0.9.3 invalid quota context fails synth", () => {
+  for (const [key, value] of [
+    ["aiGenerationDailyLimit", -1], ["aiGenerationDailyLimit", "2.5"], ["aiGenerationDailyLimit", 1001], ["aiGenerationDailyLimit", "veinte"],
+    ["aiGenerationQuotaTimeZone", "Mars/Olympus"], ["aiGenerationQuotaTimeZone", ""],
+  ] as const) {
+    assert.throws(
+      () => new FamilyLearningGamesBackendStack(new App({ context: { aiGameGenerationEnabled: true, [key]: value } }), `Invalid${key}`),
+      new RegExp(`Invalid CDK context ${key}`),
+    );
+  }
+});

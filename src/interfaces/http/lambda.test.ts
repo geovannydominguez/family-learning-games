@@ -74,6 +74,7 @@ test("enabled generation constructs one regional Bedrock client", () => {
       BEDROCK_REGION: "us-west-2",
       BEDROCK_GUARDRAIL_ID: "guardrail",
       BEDROCK_GUARDRAIL_VERSION: "DRAFT",
+      AI_GENERATION_QUOTA_TABLE_NAME: "Multiplayer",
     },
     documentClient,
     createBedrockClient: (region) => {
@@ -84,6 +85,112 @@ test("enabled generation constructs one regional Bedrock client", () => {
   });
 
   assert.deepEqual(regions, ["us-west-2"]);
+});
+
+const generationEnvironment = {
+  ...baseEnvironment,
+  AI_GAME_GENERATION_ENABLED: "true",
+  BEDROCK_GENERATOR_MODEL_ID: "global.anthropic.claude-sonnet-4-6",
+  BEDROCK_VALIDATOR_MODEL_ID: "global.anthropic.claude-sonnet-4-6",
+  BEDROCK_REGION: "us-east-1",
+  BEDROCK_GUARDRAIL_ID: "guardrail",
+  BEDROCK_GUARDRAIL_VERSION: "1",
+  AI_GENERATION_QUOTA_TABLE_NAME: "Multiplayer",
+  AI_GENERATION_DAILY_LIMIT: "20",
+  AI_GENERATION_QUOTA_TIMEZONE: "America/Guayaquil",
+};
+
+test("v0.9.3 enabled generation requires the quota table and never builds Bedrock without it", () => {
+  const environment: Record<string, string> = { ...generationEnvironment };
+  delete environment.AI_GENERATION_QUOTA_TABLE_NAME;
+  let bedrockClients = 0;
+  assert.throws(
+    () => createRuntimeRouter({ environment, documentClient, createBedrockClient: () => { bedrockClients += 1; return { send: async () => ({}) }; } }),
+    /Missing required backend configuration: AI_GENERATION_QUOTA_TABLE_NAME/,
+  );
+  assert.equal(bedrockClients, 0);
+});
+
+test("v0.9.3 rejects an invalid daily limit or time zone at startup", () => {
+  for (const override of [
+    { AI_GENERATION_DAILY_LIMIT: "-1" },
+    { AI_GENERATION_DAILY_LIMIT: "1.5" },
+    { AI_GENERATION_DAILY_LIMIT: "1001" },
+    { AI_GENERATION_DAILY_LIMIT: "veinte" },
+    { AI_GENERATION_QUOTA_TIMEZONE: "Mars/Olympus" },
+  ]) {
+    assert.throws(
+      () => createRuntimeRouter({ environment: { ...generationEnvironment, ...override }, documentClient, createBedrockClient: () => ({ send: async () => ({}) }) }),
+      /Invalid backend configuration/,
+    );
+  }
+});
+
+test("v0.9.3 quota defaults to 20 per day in America/Guayaquil when only the table is configured", async () => {
+  const environment: Record<string, string> = { ...generationEnvironment };
+  delete environment.AI_GENERATION_DAILY_LIMIT;
+  delete environment.AI_GENERATION_QUOTA_TIMEZONE;
+  const updates: Array<Record<string, unknown>> = [];
+  const router = createRuntimeRouter({
+    environment,
+    documentClient: {
+      send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
+        if (command.constructor.name === "GetCommand") return { Item: { playerId: "amelia", name: "Amelia", age: 6, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" } };
+        if (command.constructor.name === "UpdateCommand") {
+          updates.push(command.input);
+          throw Object.assign(new Error("The conditional request failed"), { name: "ConditionalCheckFailedException", Item: { used: { N: "20" } } });
+        }
+        return {};
+      },
+    } as never,
+    createBedrockClient: () => ({ send: async () => { throw new Error("must not call Bedrock"); } }),
+  });
+  await router({ requestId: "r", method: "POST", path: "/games/generate", body: JSON.stringify({ topic: "planetas", difficulty: "easy", questionCount: 10, playerId: "amelia" }) });
+  assert.equal(updates.length, 1);
+  assert.equal((updates[0].ExpressionAttributeValues as Record<string, unknown>)[":limit"], 20);
+  assert.match(String((updates[0].Key as Record<string, unknown>).SK), /^DAY#\d{4}-\d{2}-\d{2}$/);
+});
+
+test("v0.9.3 an exhausted quota answers 429 with Retry-After and never invokes Bedrock", async () => {
+  let bedrockCalls = 0;
+  const router = createRuntimeRouter({
+    environment: { ...generationEnvironment, AI_GENERATION_DAILY_LIMIT: "1" },
+    documentClient: {
+      send: async (command: { constructor: { name: string } }) => {
+        if (command.constructor.name === "GetCommand") return { Item: { playerId: "amelia", name: "Amelia", age: 6, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" } };
+        if (command.constructor.name === "UpdateCommand") {
+          throw Object.assign(new Error("The conditional request failed"), { name: "ConditionalCheckFailedException", Item: { used: { N: "1" }, reservations: { SS: ["someone-else"] } } });
+        }
+        return {};
+      },
+    } as never,
+    createBedrockClient: () => ({ send: async () => { bedrockCalls += 1; return {}; } }),
+  });
+  const response = await router({ requestId: "r", method: "POST", path: "/games/generate", body: JSON.stringify({ topic: "planetas", difficulty: "easy", questionCount: 10, playerId: "amelia" }) });
+  assert.equal(response.statusCode, 429);
+  assert.deepEqual(JSON.parse(response.body), { error: { code: "AI_GENERATION_QUOTA_EXCEEDED", message: "The daily AI game generation quota has been reached." } });
+  const retryAfter = Number(response.headers["retry-after"]);
+  assert.ok(Number.isInteger(retryAfter) && retryAfter >= 1 && retryAfter <= 25 * 60 * 60);
+  assert.equal(bedrockCalls, 0);
+});
+
+test("v0.9.3 a DynamoDB failure while reserving fails closed without invoking Bedrock", async () => {
+  let bedrockCalls = 0;
+  const router = createRuntimeRouter({
+    environment: generationEnvironment,
+    documentClient: {
+      send: async (command: { constructor: { name: string } }) => {
+        if (command.constructor.name === "GetCommand") return { Item: { playerId: "amelia", name: "Amelia", age: 6, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" } };
+        if (command.constructor.name === "UpdateCommand") throw Object.assign(new Error("timeout"), { name: "TimeoutError" });
+        return {};
+      },
+    } as never,
+    createBedrockClient: () => ({ send: async () => { bedrockCalls += 1; return {}; } }),
+  });
+  const response = await router({ requestId: "r", method: "POST", path: "/games/generate", body: JSON.stringify({ topic: "planetas", difficulty: "easy", questionCount: 10, playerId: "amelia" }) });
+  assert.equal(response.statusCode, 500);
+  assert.equal(JSON.parse(response.body).error.code, "UNEXPECTED_ERROR");
+  assert.equal(bedrockCalls, 0);
 });
 
 const mediaEnvironment = {

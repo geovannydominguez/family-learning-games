@@ -11,6 +11,13 @@ import { S3Client } from "@aws-sdk/client-s3";
 import type { GameGenerator } from "../../application/game/GameGenerator.ts";
 import type { GameValidator } from "../../application/game/GameValidator.ts";
 import { GenerateGameService } from "../../application/game/generateGameService.ts";
+import {
+  DailyGenerationQuota,
+  defaultGenerationDailyLimit,
+  defaultGenerationQuotaTimeZone,
+  readGenerationDailyLimit,
+  readGenerationQuotaTimeZone,
+} from "../../application/game/GenerationQuota.ts";
 import { GameSessionService } from "../../application/game/gameSessionService.ts";
 import { CatalogQuestionImageResolver, type MediaCatalogEntry } from "../../application/media/questionImages.ts";
 import { QuestionSpeechService } from "../../application/media/questionSpeech.ts";
@@ -25,6 +32,7 @@ import { BedrockGameGenerator } from "../../infrastructure/ai/BedrockGameGenerat
 import { BedrockGameValidator } from "../../infrastructure/ai/BedrockGameValidator.ts";
 import { DynamoDbGameRepository } from "../../infrastructure/repositories/DynamoDbGameRepository.ts";
 import { DynamoDbGameSessionRepository } from "../../infrastructure/repositories/DynamoDbGameSessionRepository.ts";
+import { DynamoDbGenerationQuota } from "../../infrastructure/repositories/DynamoDbGenerationQuota.ts";
 import { PollySpeechSynthesizer, type PollySendClient } from "../../infrastructure/media/PollySpeechSynthesizer.ts";
 import { createS3ReadUrlSigner, S3MediaObjectStore, type ReadUrlSigner, type S3SendClient } from "../../infrastructure/media/S3MediaObjectStore.ts";
 import { DynamoDbPlayerRepository } from "../../infrastructure/repositories/DynamoDbPlayerRepository.ts";
@@ -100,6 +108,7 @@ export function createRuntime({
   };
   let generatorModelId: string | undefined;
   let validatorModelId: string | undefined;
+  let generationQuota: DailyGenerationQuota | undefined;
 
   if (enabled) {
     const region = requireConfiguration("BEDROCK_REGION", environment);
@@ -107,6 +116,9 @@ export function createRuntime({
     validatorModelId = requireConfiguration("BEDROCK_VALIDATOR_MODEL_ID", environment);
     const guardrailIdentifier = requireConfiguration("BEDROCK_GUARDRAIL_ID", environment);
     const guardrailVersion = requireConfiguration("BEDROCK_GUARDRAIL_VERSION", environment);
+    // v0.9.3 (ADR-021): the global daily quota is mandatory whenever generation
+    // is enabled, and is configured before any Bedrock client exists.
+    generationQuota = readGenerationQuota(environment, documentClient);
     const bedrockClient = createBedrockClient(region);
     generator = new BedrockGameGenerator(bedrockClient, {
       modelId: generatorModelId,
@@ -184,6 +196,7 @@ export function createRuntime({
     playerService,
     generationService: new GenerateGameService(generator, validator, games, players, {
       enabled,
+      ...(generationQuota ? { quota: generationQuota } : {}),
       createId,
       logDiagnostic: (diagnostic) => console.log(JSON.stringify(diagnostic)),
       logEvent: (event) => console.log(JSON.stringify(event)),
@@ -202,6 +215,22 @@ function readMultiplayerSettings(environment: Record<string, string | undefined>
     roomTtlMinutes: readInteger("MULTIPLAYER_ROOM_TTL_MINUTES", environment, defaultMultiplayerSettings.roomTtlMinutes, 10, 720),
     placementTieWindowMs: readInteger("MULTIPLAYER_PLACEMENT_TIE_WINDOW_MS", environment, defaultMultiplayerSettings.placementTieWindowMs, 0, 1_000),
   };
+}
+
+function readGenerationQuota(
+  environment: Record<string, string | undefined>,
+  documentClient: ConstructorParameters<typeof DynamoDbGenerationQuota>[0],
+): DailyGenerationQuota {
+  const tableName = requireConfiguration("AI_GENERATION_QUOTA_TABLE_NAME", environment);
+  let dailyLimit: number;
+  let timeZone: string;
+  try {
+    dailyLimit = readGenerationDailyLimit(environment.AI_GENERATION_DAILY_LIMIT || String(defaultGenerationDailyLimit));
+    timeZone = readGenerationQuotaTimeZone(environment.AI_GENERATION_QUOTA_TIMEZONE || defaultGenerationQuotaTimeZone);
+  } catch (error) {
+    throw new Error(`Invalid backend configuration: ${(error as Error).message}`);
+  }
+  return new DailyGenerationQuota({ store: new DynamoDbGenerationQuota(documentClient, tableName), dailyLimit, timeZone });
 }
 
 function readInteger(name: string, environment: Record<string, string | undefined>, fallback: number, min: number, max: number): number {

@@ -234,3 +234,19 @@ test("v0.9.2: a 429 outside AI generation is a generic REQUEST_THROTTLED error, 
   const nonJson = new GameApiClient("https://api.example.com", async () => new Response("Too Many Requests", { status: 429 }));
   await assert.rejects(nonJson.listGames(), (error: unknown) => error instanceof GameApiError && error.code === "REQUEST_THROTTLED");
 });
+
+test("v0.9.3: an exhausted generation quota keeps its own code (not RATE_LIMITED) and is never retried", async () => {
+  let calls = 0;
+  const client = new GameApiClient("https://api.example.com", async () => {
+    calls += 1;
+    return new Response(
+      JSON.stringify({ error: { code: "AI_GENERATION_QUOTA_EXCEEDED", message: "The daily AI game generation quota has been reached." } }),
+      { status: 429, headers: { "retry-after": "3600" } },
+    );
+  });
+  await assert.rejects(
+    client.generateGame({ topic: "animals", difficulty: "easy", questionCount: 10, playerId: "amelia" }),
+    (error: unknown) => error instanceof GameApiError && error.code === "AI_GENERATION_QUOTA_EXCEEDED" && error.status === 429,
+  );
+  assert.equal(calls, 1);
+});

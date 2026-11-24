@@ -10,7 +10,7 @@ import { MultiplayerGame } from "../multiplayer/MultiplayerGame";
 import { loadMultiplayerSession } from "../multiplayer/multiplayerRoomState";
 import { QuestionAudioButton, QuestionImageView } from "./QuestionMedia";
 import { AiGameBadge } from "./AiGameBadge";
-import { aiGenerationNotice, buildStartSessionCommand, createdGameDifficulty, gameUiErrorMessage, selectCreatedGames } from "./gameUiState";
+import { aiGenerationNotice, buildStartSessionCommand, createdGameDifficulty, gameUiErrorMessage, isGenerationQuotaExceeded, selectCreatedGames } from "./gameUiState";
 
 interface PlayerFormState {
   open: boolean;
@@ -47,6 +47,9 @@ export function QuizGame() {
   const [generationTopic, setGenerationTopic] = useState("");
   const [generationDifficulty, setGenerationDifficulty] = useState<Difficulty>("easy");
   const [generatedGame, setGeneratedGame] = useState<PublicGame | null>(null);
+  // v0.9.3: once today's generation quota is exhausted, creation stays disabled
+  // for this page session (no automatic or repeated retries).
+  const [generationQuotaReached, setGenerationQuotaReached] = useState(false);
   const [session, setSession] = useState<PublicGameSession | null>(null);
   const [feedback, setFeedback] = useState<AnswerFeedback | null>(null);
   const [pendingSession, setPendingSession] = useState<PublicGameSession | null>(null);
@@ -223,6 +226,7 @@ export function QuizGame() {
 
   async function generateGame(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (generationQuotaReached || submitting) return;
     if (!selectedPlayer) {
       setError("Elige un jugador antes de crear un juego.");
       setStep("player");
@@ -248,6 +252,7 @@ export function QuizGame() {
       setSelectedGameId(game.id);
       void loadCreatedGames();
     } catch (caught) {
+      if (isGenerationQuotaExceeded(caught)) setGenerationQuotaReached(true);
       setError(gameUiErrorMessage(caught, "No pudimos crear el juego."));
     } finally {
       setSubmitting(false);
@@ -351,8 +356,9 @@ export function QuizGame() {
         <select id="generation-difficulty" value={generationDifficulty} disabled={submitting} onChange={(event) => { setGenerationDifficulty(event.target.value as Difficulty); setGeneratedGame(null); }} className="mt-2 min-h-14 w-full rounded-2xl border-2 border-violet-200 bg-white px-4 text-lg font-bold outline-none focus-visible:ring-4 focus-visible:ring-violet-300 disabled:opacity-60">
           {difficultyOptions.filter((option) => setup.difficulties.includes(option.id)).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
         </select>
-        <button className="button-primary mt-7 w-full" type="submit" disabled={submitting}>{submitting ? "Creando juego…" : "Crear juego"}</button>
+        <button className="button-primary mt-7 w-full" type="submit" disabled={submitting || generationQuotaReached}>{submitting ? "Creando juego…" : generationQuotaReached ? "Vuelve mañana para crear más" : "Crear juego"}</button>
       </form>
+      {generationQuotaReached && <div className="mx-auto mt-6 max-w-2xl text-center"><button type="button" className="button-secondary" onClick={() => { setError(null); setStep("category"); }}>🎲 Ver juegos disponibles</button></div>}
       {generatedGame && <section className="mx-auto mt-8 max-w-2xl rounded-3xl bg-emerald-50 p-6 text-center" aria-live="polite"><span className="text-5xl" aria-hidden="true">{generatedGame.category.icon || "✨"}</span><h2 className="mt-3 text-2xl font-black text-slate-900">{generatedGame.title} <AiGameBadge gameId={generatedGame.id} /></h2><p className="mt-2 text-slate-700">Tu juego está listo.</p><button type="button" className="button-primary mt-5" disabled={submitting} onClick={() => void startGame(generationDifficulty, generatedGame.id)}>{submitting ? "Iniciando…" : "Jugar ahora"}</button></section>}
     </SelectionLayout>
   );

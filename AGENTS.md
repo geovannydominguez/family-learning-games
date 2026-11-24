@@ -45,6 +45,7 @@ Previous accepted architecture/ADRs remain relevant unless superseded. In partic
 - `ADR-018-api-gateway-websocket-multiplayer.md` decides one API Gateway WebSocket API for multiplayer, integrated with the same backend Lambda; the HTTP API keeps room bootstrap.
 - `ADR-019-server-authoritative-multiplayer-state.md` decides server-authoritative multiplayer state, scoring and ranking in one dedicated TTL-backed DynamoDB table, with conditional writes/transactions for every concurrent transition.
 - `ADR-020-multiplayer-room-membership-and-ephemeral-tokens.md` decides room membership through a short room code plus an opaque, hashed, room-scoped `participantToken` (no Cognito/login).
+- `ADR-021-ai-generation-daily-quota.md` (v0.9.3) decides one global daily quota of admitted `POST /games/generate` requests (default 20 per `America/Guayaquil` day), reserved atomically in the multiplayer table before any Bedrock call and never refunded; exhaustion answers `429 AI_GENERATION_QUOTA_EXCEEDED` + `Retry-After`. It is not a monetary cap and never keys on `playerId`.
 
 ## Architecture
 
@@ -193,6 +194,9 @@ BEDROCK_GUARDRAIL_ID
 BEDROCK_GUARDRAIL_VERSION
 MEDIA_BUCKET_NAME            # v0.8, set by CDK; media is disabled when absent
 MULTIPLAYER_TABLE_NAME       # v0.9, set by CDK; multiplayer is disabled when absent
+AI_GENERATION_QUOTA_TABLE_NAME # v0.9.3, set by CDK (multiplayer table) when AI generation is enabled; required then
+AI_GENERATION_DAILY_LIMIT    # v0.9.3, default 20 (CDK context aiGenerationDailyLimit, 0..1000; 0 blocks generation)
+AI_GENERATION_QUOTA_TIMEZONE # v0.9.3, default America/Guayaquil (CDK context aiGenerationQuotaTimeZone, IANA)
 MULTIPLAYER_MAX_PLAYERS      # default 8 (CDK context multiplayerMaxPlayers, 2..8)
 MULTIPLAYER_ROOM_TTL_MINUTES # default 120
 MULTIPLAYER_PLACEMENT_TIE_WINDOW_MS # default 100
@@ -214,7 +218,7 @@ AI generation defaults to disabled. Bedrock generator/validator models, region, 
 `ADR-011` continues to define the independent Generator/Validator pipeline and deterministic Application validation. `ADR-015` defines the v0.7.1 model/configuration and quality evolution.
 
 ## Persistence
-Use the existing `Games`, `GameSessions`, and `Players` tables (`Players`: PK = `playerId`, no secondary indexes). Do not introduce RDS, Aurora, S3-as-database, Redis, or ElastiCache. The Service Worker cache and browser storage are not application persistence. The v0.8 media bucket stores binary media only (curated images and derived audio cache), never game/session/player state; do not add a media DynamoDB table. v0.9 adds exactly one ephemeral `<env>-family-learning-games-multiplayer` table (rooms, memberships, answers, connections, room-code reservations; TTL on `expiresAt`); do not add further multiplayer tables or indexes without an ADR.
+Use the existing `Games`, `GameSessions`, and `Players` tables (`Players`: PK = `playerId`, no secondary indexes). Do not introduce RDS, Aurora, S3-as-database, Redis, or ElastiCache. The Service Worker cache and browser storage are not application persistence. The v0.8 media bucket stores binary media only (curated images and derived audio cache), never game/session/player state; do not add a media DynamoDB table. v0.9 adds exactly one ephemeral `<env>-family-learning-games-multiplayer` table (rooms, memberships, answers, connections, room-code reservations; TTL on `expiresAt`); do not add further multiplayer tables or indexes without an ADR. Since v0.9.3 (ADR-021) the same table also holds the AI generation quota items `QUOTA#AI_GENERATION / DAY#<YYYY-MM-DD>` (one conditional `UpdateItem` per admitted generation; TTL is cleanup only).
 
 ## Allowed in the v0.7 baseline
 - AWS Amplify Hosting for the Next.js frontend, with the existing `play.joamgames.com` custom domain

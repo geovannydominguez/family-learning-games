@@ -5,7 +5,7 @@ import test from "node:test";
 import type { Category, Difficulty, Game, Player, Question } from "../../domain/game/types.ts";
 import type { Player as FamilyPlayer } from "../../domain/player/types.ts";
 import type { GameRepository } from "../../repositories/game/GameRepository.ts";
-import { ApplicationError, PersistenceError } from "../errors.ts";
+import { ApplicationError, GenerationQuotaExceededError, PersistenceError } from "../errors.ts";
 import type { PlayerRepository } from "../player/PlayerRepository.ts";
 import {
   InvalidGeneratedGameCandidateError,
@@ -20,6 +20,8 @@ import {
   type GameValidator,
   type ValidateGeneratedGameRequest,
 } from "./GameValidator.ts";
+import { DailyGenerationQuota, type GenerationQuota } from "./GenerationQuota.ts";
+import { InMemoryGenerationQuota } from "../../infrastructure/repositories/InMemoryGenerationQuota.ts";
 import {
   GenerateGameService,
   shuffleAnswers,
@@ -166,6 +168,11 @@ function validatorFrom(
   };
 }
 
+/** A quota that never limits the pipeline tests that are not about the quota. */
+function unlimitedQuota(): DailyGenerationQuota {
+  return new DailyGenerationQuota({ store: new InMemoryGenerationQuota(), dailyLimit: 1_000, timeZone: "America/Guayaquil" });
+}
+
 function createService(
   generator: GameGenerator,
   repository = new StubGameRepository(),
@@ -176,6 +183,7 @@ function createService(
 ): GenerateGameService {
   return new GenerateGameService(generator, validator, repository, playerRepository, {
     enabled,
+    quota: unlimitedQuota(),
     createId: () => "123e4567-e89b-12d3-a456-426614174000",
     logDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
   });
@@ -777,7 +785,7 @@ test("keeps game.id unique across generations while category.id stays stable", a
     validatorFrom(),
     new StubGameRepository(),
     new StubPlayerRepository(),
-    { enabled: true, createId: () => `uuid-${(counter += 1)}` },
+    { enabled: true, quota: unlimitedQuota(), createId: () => `uuid-${(counter += 1)}` },
   );
 
   const first = await service.generate({ topic: "Números", difficulty: "easy", questionCount: 10, playerId: "amelia" });
@@ -823,6 +831,7 @@ function serviceWith(
 ): { service: GenerateGameService; repository: StubGameRepository; events: GenerationPipelineEvent[] } {
   const service = new GenerateGameService(generator, validator, repository, new StubPlayerRepository(), {
     enabled: true,
+    quota: unlimitedQuota(),
     createId: () => "123e4567-e89b-12d3-a456-426614174000",
     logEvent: (event) => events.push(event),
     models: { generator: "amazon.nova-lite-v1:0", validator: "amazon.nova-pro-v1:0" },
@@ -869,9 +878,12 @@ function reviewFirstQuestionAs(
 test("valid pipeline: ten generated, one round, one save", async () => {
   const generator = generatorFrom(() => makeDraft());
   const validator = validatorFrom(agreeingReview);
-  const { service, repository, events } = serviceWith(generator, validator);
+  const { service, repository, events: allEvents } = serviceWith(generator, validator);
 
   const game = await service.generate(generateCommand);
+  // The v0.9.3 quota reservation event precedes the pipeline; it is covered by its own tests.
+  assert.equal(allEvents[0]?.event, "AI_GAME_GENERATION_QUOTA_RESERVED");
+  const events = allEvents.slice(1);
 
   assert.equal(generator.calls.length, 1);
   assert.equal(generator.calls[0].questionCount, 10);
@@ -1192,6 +1204,7 @@ test("a configurable attempt budget bounds the Generate → Validate cycles", as
   const repository = new StubGameRepository();
   const service = new GenerateGameService(generator, validator, repository, new StubPlayerRepository(), {
     enabled: true,
+    quota: unlimitedQuota(),
     createId: () => "id",
     maxAttempts: 2,
   });
@@ -1492,6 +1505,7 @@ function serviceWithLogs(
   const repository = new StubGameRepository();
   const service = new GenerateGameService(generator, validator, repository, new StubPlayerRepository(), {
     enabled: true,
+    quota: unlimitedQuota(),
     createId: () => "id",
     logEvent: (event) => events.push(event),
     logDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
@@ -1704,6 +1718,7 @@ test("batch-size bug fix: a 10-question response to a 1-question repair is rejec
   const validator = validatorFrom(reviewRejecting(["Question 0"]));
   const service = new GenerateGameService(generator, validator, new StubGameRepository(), new StubPlayerRepository(), {
     enabled: true,
+    quota: unlimitedQuota(),
     createId: () => "123e4567-e89b-12d3-a456-426614174000",
     logEvent: (event) => events.push(event),
     logDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
@@ -1804,6 +1819,7 @@ function budgetHarness(
   const repository = new StubGameRepository();
   const service = new GenerateGameService(generator, validator, repository, new StubPlayerRepository(), {
     enabled: true,
+    quota: unlimitedQuota(),
     createId: () => "123e4567-e89b-12d3-a456-426614174000",
     logEvent: (event) => events.push(event),
     now: () => clock,
@@ -1824,6 +1840,7 @@ test("answer order: the generator's position of the correct answer does not reac
   const repository = new StubGameRepository();
   const service = new GenerateGameService(generator, validator, repository, new StubPlayerRepository(), {
     enabled: true,
+    quota: unlimitedQuota(),
     createId: () => "123e4567-e89b-12d3-a456-426614174000",
     random: seededRandom(7),
   });
@@ -1848,6 +1865,7 @@ test("answer order: the shuffle happens after validation, so the deterministic c
   const validator = validatorFrom(agreeingReview);
   const service = new GenerateGameService(generator, validator, new StubGameRepository(), new StubPlayerRepository(), {
     enabled: true,
+    quota: unlimitedQuota(),
     random: seededRandom(11),
   });
 
@@ -2247,4 +2265,168 @@ test("v0.8: model-emitted media is never persisted — generated games stay text
 
   assert.equal(game.questions.some((question) => "media" in question), false);
   assert.equal(repository.created[0].questions.some((question) => "media" in question), false);
+});
+
+// ---------------------------------------------------------------------------
+// v0.9.3 — ADR-021: global daily generation quota
+// ---------------------------------------------------------------------------
+
+const quotaClock = () => Date.parse("2026-11-13T15:00:00.000Z");
+
+function quotaService(options: {
+  generator?: GameGenerator & { calls: GenerateGameRequest[] };
+  validator?: GameValidator & { calls: ValidateGeneratedGameRequest[] };
+  store?: GenerationQuota;
+  limit?: number;
+  repository?: StubGameRepository;
+  playerRepository?: PlayerRepository;
+  enabled?: boolean;
+} = {}) {
+  const generator = options.generator ?? generatorFrom((request) => makeDraft(request.questionCount));
+  const validator = options.validator ?? validatorFrom();
+  const store = options.store ?? new InMemoryGenerationQuota();
+  const repository = options.repository ?? new StubGameRepository();
+  const events: GenerationPipelineEvent[] = [];
+  let ids = 0;
+  const service = new GenerateGameService(generator, validator, repository, options.playerRepository ?? new StubPlayerRepository(), {
+    enabled: options.enabled ?? true,
+    quota: new DailyGenerationQuota({ store, dailyLimit: options.limit ?? 2, timeZone: "America/Guayaquil", now: quotaClock }),
+    createId: () => `quota-${(ids += 1)}`,
+    logEvent: (event) => events.push(event),
+  });
+  return { service, generator, validator, store, repository, events };
+}
+
+const isQuotaExceeded = (error: unknown) => error instanceof GenerationQuotaExceededError
+  && error.code === "AI_GENERATION_QUOTA_EXCEEDED"
+  && error.retryAfterSeconds === 14 * 60 * 60;
+
+test("v0.9.3 an enabled service cannot be built without a generation quota", () => {
+  assert.throws(
+    () => new GenerateGameService(generatorFrom(() => makeDraft()), validatorFrom(), new StubGameRepository(), new StubPlayerRepository(), { enabled: true }),
+    /requires a generation quota/,
+  );
+  // Disabled generation needs no quota.
+  new GenerateGameService(generatorFrom(() => makeDraft()), validatorFrom(), new StubGameRepository(), new StubPlayerRepository(), { enabled: false });
+});
+
+test("v0.9.3 quota available: one unit is reserved before the first Bedrock call", async () => {
+  const order: string[] = [];
+  const memory = new InMemoryGenerationQuota();
+  const store: GenerationQuota = { reserve: async (reservation) => { order.push("reserve"); return memory.reserve(reservation); } };
+  const generator = generatorFrom((request) => { order.push("generate"); return makeDraft(request.questionCount); });
+  const { service, events } = quotaService({ generator, store });
+
+  await service.generate(generateCommand);
+  assert.deepEqual(order, ["reserve", "generate"]);
+  assert.equal(memory.used("2026-11-13"), 1);
+  const reserved = events.find((event) => event.event === "AI_GAME_GENERATION_QUOTA_RESERVED");
+  assert.ok(reserved);
+  assert.equal(reserved.quotaPeriod, "2026-11-13");
+  assert.equal(reserved.quotaUsed, 1);
+  assert.equal(reserved.quotaLimit, 2);
+  assert.equal(JSON.stringify(events).includes("amelia"), false);
+});
+
+test("v0.9.3 last unit admitted, then exhausted: no Bedrock call and nothing persisted", async () => {
+  const { service, generator, validator, repository, events } = quotaService({ limit: 2 });
+
+  await service.generate(generateCommand);
+  await service.generate(generateCommand); // the last admitted generation
+  assert.equal(generator.calls.length, 2);
+
+  await assert.rejects(service.generate(generateCommand), isQuotaExceeded);
+  await assert.rejects(service.generate(generateCommand), isQuotaExceeded);
+  assert.equal(generator.calls.length, 2, "no additional generator calls after exhaustion");
+  assert.equal(validator.calls.length, 2, "no additional validator calls after exhaustion");
+  assert.equal(repository.created.length, 2);
+  const exhausted = events.filter((event) => event.event === "AI_GAME_GENERATION_QUOTA_EXHAUSTED");
+  assert.equal(exhausted.length, 2);
+  assert.equal(exhausted[0].level, "warn");
+});
+
+test("v0.9.3 concurrent generations never exceed the quota nor the Bedrock calls it admits", async () => {
+  const generator = generatorFrom(async (request) => {
+    await new Promise((resolve) => setImmediate(resolve));
+    return makeDraft(request.questionCount);
+  });
+  const { service, store } = quotaService({ generator, limit: 3 });
+
+  const results = await Promise.allSettled(Array.from({ length: 12 }, () => service.generate(generateCommand)));
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 3);
+  assert.equal(results.filter((result) => result.status === "rejected" && isQuotaExceeded(result.reason)).length, 9);
+  assert.equal(generator.calls.length, 3);
+  assert.equal((store as InMemoryGenerationQuota).used("2026-11-13"), 3);
+});
+
+test("v0.9.3 cheap rejections never consume quota (disabled, invalid request, unknown player)", async () => {
+  const store = new InMemoryGenerationQuota();
+  const disabled = new GenerateGameService(generatorFrom(() => makeDraft()), validatorFrom(), new StubGameRepository(), new StubPlayerRepository(), {
+    enabled: false,
+    quota: new DailyGenerationQuota({ store, dailyLimit: 2, timeZone: "America/Guayaquil", now: quotaClock }),
+  });
+  await assert.rejects(disabled.generate(generateCommand), (error: unknown) => error instanceof ApplicationError && error.code === "AI_GENERATION_DISABLED");
+
+  const { service } = quotaService({ store });
+  await assert.rejects(service.generate({ ...generateCommand, topic: "   " }), (error: unknown) => error instanceof ApplicationError && error.code === "INVALID_GENERATION_REQUEST");
+  await assert.rejects(service.generate({ ...generateCommand, playerId: "ghost" }), (error: unknown) => error instanceof ApplicationError && error.code === "INVALID_GENERATION_REQUEST");
+  assert.equal(store.requests.length, 0);
+});
+
+test("v0.9.3 a quota storage failure fails closed: no Bedrock call", async () => {
+  const failure = new PersistenceError("reserve-ai-generation-quota", Object.assign(new Error("x"), { name: "TimeoutError" }));
+  const { service, generator, validator, repository } = quotaService({ store: { reserve: async () => { throw failure; } } });
+
+  await assert.rejects(service.generate(generateCommand), (error: unknown) => error === failure);
+  assert.equal(generator.calls.length, 0);
+  assert.equal(validator.calls.length, 0);
+  assert.equal(repository.created.length, 0);
+});
+
+test("v0.9.3 failed generations keep their unit (Bedrock, guardrail, invalid content, persistence)", async () => {
+  const store = new InMemoryGenerationQuota();
+  const cases: Array<{ generator: GameGenerator & { calls: GenerateGameRequest[] }; validator?: GameValidator & { calls: ValidateGeneratedGameRequest[] }; repository?: StubGameRepository; code: string }> = [
+    { generator: generatorFrom(() => { throw new Error("bedrock 5xx"); }), code: "AI_GENERATION_FAILED" },
+    {
+      generator: generatorFrom(() => { throw new InvalidGeneratedGameCandidateError({ failureType: "guardrail_intervened", stopReason: "guardrail_intervened" }); }),
+      code: "AI_GENERATION_BLOCKED",
+    },
+    { generator: generatorFrom((request) => makeDraft(request.questionCount)), validator: validatorFrom(() => { throw new GameValidatorError("validator down"); }), code: "AI_GENERATION_FAILED" },
+  ];
+  for (const entry of cases) {
+    const { service } = quotaService({ generator: entry.generator, ...(entry.validator ? { validator: entry.validator } : {}), store, limit: 10 });
+    await assert.rejects(service.generate(generateCommand), (error: unknown) => error instanceof ApplicationError && error.code === entry.code);
+  }
+  const repository = new StubGameRepository();
+  repository.createFailure = new PersistenceError("create-game", new Error("x"));
+  const { service } = quotaService({ repository, store, limit: 10 });
+  await assert.rejects(service.generate(generateCommand), PersistenceError);
+
+  assert.equal(store.used("2026-11-13"), 4, "every admitted attempt consumed one unit; none was returned");
+});
+
+test("v0.9.3 a client retry after a failure is a new request that consumes another unit", async () => {
+  let call = 0;
+  const generator = generatorFrom((request) => {
+    call += 1;
+    if (call <= 2) throw new Error("bedrock 5xx"); // first request: attempt + its technical retry
+    return makeDraft(request.questionCount);
+  });
+  const { service, store } = quotaService({ generator, limit: 2 });
+
+  await assert.rejects(service.generate(generateCommand), (error: unknown) => error instanceof ApplicationError && error.code === "AI_GENERATION_FAILED");
+  await service.generate(generateCommand); // the user's manual retry
+  assert.equal((store as InMemoryGenerationQuota).used("2026-11-13"), 2);
+  await assert.rejects(service.generate(generateCommand), isQuotaExceeded);
+  assert.equal(generator.calls.length, 3);
+});
+
+test("v0.9.3 the per-request Bedrock bounds are unchanged by the quota (rounds and technical retries)", async () => {
+  const generator = generatorFrom((request) => makeDraft(request.questionCount));
+  const validator = validatorFrom(disagreeingReview);
+  const { service } = quotaService({ generator, validator, limit: 5 });
+
+  await assert.rejects(service.generate(generateCommand), (error: unknown) => error instanceof ApplicationError && error.code === "AI_GENERATED_CONTENT_INVALID");
+  assert.equal(generator.calls.length, 5, "default 5 repair rounds");
+  assert.equal(validator.calls.length, 5);
 });

@@ -10,6 +10,8 @@ export type ApplicationErrorCode =
   | "AI_GENERATION_FAILED"
   | "AI_GENERATION_BLOCKED"
   | "AI_GENERATED_CONTENT_INVALID"
+  // v0.9.3 global daily generation quota (ADR-021)
+  | "AI_GENERATION_QUOTA_EXCEEDED"
   | "INVALID_PLAYER"
   | "INVALID_PLAYER_AGE"
   | "PLAYER_NOT_FOUND"
@@ -42,6 +44,20 @@ export class ApplicationError extends Error {
     super(message);
     this.code = code;
     this.name = "ApplicationError";
+  }
+}
+
+/**
+ * v0.9.3 (ADR-021): the global daily generation quota is exhausted. Carries the
+ * seconds until the next local-day period so HTTP can send `Retry-After`.
+ */
+export class GenerationQuotaExceededError extends ApplicationError {
+  readonly retryAfterSeconds: number;
+
+  constructor(retryAfterSeconds: number) {
+    super("AI_GENERATION_QUOTA_EXCEEDED", "The daily AI game generation quota has been reached.");
+    this.name = "GenerationQuotaExceededError";
+    this.retryAfterSeconds = Math.max(1, Math.ceil(retryAfterSeconds));
   }
 }
 

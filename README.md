@@ -57,6 +57,8 @@ Tests use injected clients and do not call live AWS services. `npm run build` pr
 | `generationThrottleRateLimit` | `0.1` | Rate limit for `POST /games/generate`, in requests/second (fractions allowed; v0.9.2, was `1`). |
 | `generationThrottleBurstLimit` | `1` | Burst limit for `POST /games/generate` (v0.9.2, was `2`). |
 | `rateLimits` | (defaults in `infra/lib/rateLimits.ts`) | v0.9.2: optional partial JSON override of the HTTP stage/route throttles, the WebSocket stage throttle and the DynamoDB maximum on-demand throughput. |
+| `aiGenerationDailyLimit` | `20` | v0.9.3: admitted AI generation requests per local day (0..1000; `0` blocks generation). Applied only with `aiGameGenerationEnabled=true`. |
+| `aiGenerationQuotaTimeZone` | `America/Guayaquil` | v0.9.3: IANA time zone that defines the quota day. |
 | `tableDeletionProtection` | `true` | v0.9.2: `RemovalPolicy.RETAIN` plus DynamoDB deletion protection on the four tables. `false` only for disposable stacks. |
 | `audioCacheVersion` | `v1` | Part of the audio cache key; bump it to invalidate cached audio after a voice/prosody policy change. |
 | `audioCacheExpirationDays` | `30` | Lifecycle expiration for the derived `audio-cache/` prefix only. |
@@ -70,6 +72,8 @@ When AI is enabled, CDK provisions one family-safe Bedrock Guardrail and one pub
 Generated candidates enforce these additional metadata limits before persistence: category ID 80 characters, category name 100, category description 300, category icon 16, question ID 80, answer ID 80, emoji 16, and image reference 2048. Every supplied field is trimmed and must remain non-empty; the existing title/question/answer limits remain 100/240/120.
 
 Since v0.9.2 (Infrastructure Rate Limits) the HTTP `$default` stage has a default throttle (10 rps / burst 20) with route overrides for `POST /games/generate` (0.1 / 1), question audio (2 / 10), room creation (1 / 5) and room join (2 / 10). The WebSocket `production` stage is throttled at 20 messages/s (burst 40), and each DynamoDB table has a maximum on-demand throughput. These bound rates, not spending, and are aggregate rather than per client. A `429` is shown as a friendly retry-later message (game-creation specific only for generation); the client and UI NEVER perform aggressive or automatic retries. No Lambda reserved concurrency is configured: the account quota (10) does not allow it. See `docs/security/infrastructure-rate-limits-v0.9.2.md`.
+
+Since v0.9.3 (ADR-021) AI generation also has a **global daily quota**: at most `aiGenerationDailyLimit` (default 20) admitted `POST /games/generate` requests per `America/Guayaquil` day, reserved atomically in the multiplayer table before any Bedrock call and never refunded (failed generations count). When exhausted the API answers `429 AI_GENERATION_QUOTA_EXCEEDED` with `Retry-After`, Bedrock is not called, and the UI asks to come back tomorrow while existing and multiplayer games stay playable. It bounds generations per day, not dollars. See `docs/security/ai-generation-quota-v0.9.3.md`.
 
 ## Manual deployment
 

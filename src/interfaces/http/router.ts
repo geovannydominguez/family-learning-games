@@ -1,4 +1,4 @@
-import { ApplicationError, PersistenceError } from "../../application/errors.ts";
+import { ApplicationError, GenerationQuotaExceededError, PersistenceError } from "../../application/errors.ts";
 import type { GenerateGameService } from "../../application/game/generateGameService.ts";
 import type { GameSessionService } from "../../application/game/gameSessionService.ts";
 import type { PublicGame } from "../../application/game/gameSessionContracts.ts";
@@ -332,7 +332,13 @@ function readDifficulty(value: unknown): Difficulty {
 function mapError(error: unknown): HttpResponse {
   if (error instanceof ApplicationError) {
     const status = applicationErrorStatus(error.code);
-    return json(status, { error: { code: error.code, message: error.message } });
+    const response = json(status, { error: { code: error.code, message: error.message } });
+    // v0.9.3 (ADR-021): seconds until the next local-day quota period. Same
+    // error envelope; the header is additive and carries no internal detail.
+    if (error instanceof GenerationQuotaExceededError) {
+      response.headers = { ...response.headers, "retry-after": String(error.retryAfterSeconds) };
+    }
+    return response;
   }
   return json(500, { error: { code: "UNEXPECTED_ERROR", message: "An unexpected error occurred." } });
 }
@@ -365,6 +371,8 @@ function applicationErrorStatus(code: ApplicationError["code"]): number {
       return 422;
     case "MULTIPLAYER_DISABLED":
       return 503;
+    case "AI_GENERATION_QUOTA_EXCEEDED":
+      return 429;
     case "AI_GENERATED_CONTENT_INVALID":
     // A Guardrail block is a permanent, request-specific refusal (not a transient
     // upstream fault), so it is a 4xx like invalid content — never a 5xx. Provider

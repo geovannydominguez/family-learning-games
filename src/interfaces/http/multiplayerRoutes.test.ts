@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { GameSessionService } from "../../application/game/gameSessionService.ts";
+import { GenerateGameService } from "../../application/game/generateGameService.ts";
+import { DailyGenerationQuota } from "../../application/game/GenerationQuota.ts";
+import { InMemoryGenerationQuota } from "../../infrastructure/repositories/InMemoryGenerationQuota.ts";
 import { createMultiplayerKit } from "../../application/multiplayer/multiplayerTestKit.ts";
 import { PlayerService } from "../../application/player/playerService.ts";
 import { InMemoryGameSessionRepository } from "../../infrastructure/repositories/InMemoryGameSessionRepository.ts";
@@ -91,4 +94,44 @@ test("multiplayer routes answer 503 MULTIPLAYER_DISABLED when no multiplayer tab
     assert.equal(response.statusCode, 503);
     assert.equal(JSON.parse(response.body).error.code, "MULTIPLAYER_DISABLED");
   }
+});
+
+test("v0.9.3 an exhausted AI generation quota answers 429 + Retry-After and leaves existing and multiplayer games playable", async () => {
+  const kit = createMultiplayerKit();
+  const seeded = await kit.games.findById("animals");
+  assert.ok(seeded);
+  // An AI-generated game created earlier today stays playable in multiplayer.
+  await kit.games.create({ ...seeded, id: "ai-earlier-today" });
+  let bedrockCalls = 0;
+  const failIfCalled = async () => { bedrockCalls += 1; throw new Error("must not call Bedrock"); };
+  const generationService = new GenerateGameService({ generate: failIfCalled }, { validate: failIfCalled }, kit.games, kit.players, {
+    enabled: true,
+    quota: new DailyGenerationQuota({ store: new InMemoryGenerationQuota(), dailyLimit: 0, timeZone: "America/Guayaquil" }),
+  });
+  const router = createHttpRouter({
+    games: kit.games,
+    sessionService: new GameSessionService(kit.games, new InMemoryGameSessionRepository(), kit.players),
+    playerService: new PlayerService(kit.players),
+    multiplayerRoomService: kit.roomService,
+    generationService,
+    log: () => {},
+  });
+  const post = (path: string, body: unknown) => router({ requestId: "r", method: "POST", path, body: JSON.stringify(body) });
+
+  const refused = await post("/games/generate", { topic: "planetas", difficulty: "easy", questionCount: 10, playerId: "ana" });
+  assert.equal(refused.statusCode, 429);
+  assert.deepEqual(JSON.parse(refused.body), { error: { code: "AI_GENERATION_QUOTA_EXCEEDED", message: "The daily AI game generation quota has been reached." } });
+  assert.match(refused.headers["retry-after"] ?? "", /^[1-9]\d*$/);
+  assert.equal(refused.headers["content-type"], "application/json; charset=utf-8");
+  assert.equal(bedrockCalls, 0);
+
+  const catalog = await router({ requestId: "r", method: "GET", path: "/games" });
+  assert.equal(catalog.statusCode, 200);
+  assert.ok(JSON.parse(catalog.body).some((game: { id: string }) => game.id === "ai-earlier-today"));
+  assert.equal((await post("/multiplayer/rooms", { gameId: "animals", playerId: "ana" })).statusCode, 201);
+  const aiRoom = await post("/multiplayer/rooms", { gameId: "ai-earlier-today", playerId: "ana" });
+  assert.equal(aiRoom.statusCode, 201);
+  const joined = await post(`/multiplayer/rooms/${JSON.parse(aiRoom.body).roomCode}/join`, { playerId: "beto" });
+  assert.equal(joined.statusCode, 201);
+  assert.equal((await post("/game-sessions", { playerId: "ana", categoryId: "animals", difficulty: "easy" })).statusCode, 201);
 });

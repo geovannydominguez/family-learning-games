@@ -54,11 +54,24 @@ export function buildCreatedGameSessionCommand(playerId: string, game: PublicGam
   return buildStartSessionCommand(playerId, game.category.id, createdGameDifficulty(game), game.id);
 }
 
+/** v0.9.3 (ADR-021): copy shown when the global daily AI generation quota is exhausted. */
+export const generationQuotaExceededMessage = "¡Por hoy ya creamos todos los juegos nuevos! 🌙 Mañana podrás crear más. Mientras tanto, puedes jugar los juegos que ya tienes.";
+
+/**
+ * v0.9.3: the backend refused the generation because today's quota is used up.
+ * The UI must not retry and keeps the create button disabled afterwards.
+ */
+export function isGenerationQuotaExceeded(error: unknown): boolean {
+  return error instanceof GameApiError && error.code === "AI_GENERATION_QUOTA_EXCEEDED";
+}
+
 /** v0.9.2: generic copy for API Gateway throttling outside AI generation. */
 export const throttledRequestMessage = "Hay muchas solicitudes en este momento. Espera unos segundos e inténtalo otra vez.";
 
 export function gameUiErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof GameApiError) {
+    // Checked before the generic 429 branches: it is a 429 with its own code.
+    if (isGenerationQuotaExceeded(error)) return generationQuotaExceededMessage;
     if (error.code === "RATE_LIMITED") {
       return "Muchas familias están creando juegos ahora. Espera un momento e inténtalo nuevamente.";
     }

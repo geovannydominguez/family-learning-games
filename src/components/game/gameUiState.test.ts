@@ -10,7 +10,9 @@ import {
   createdGameDifficulty,
   aiGenerationNotice,
   gameUiErrorMessage,
+  generationQuotaExceededMessage,
   isAiGeneratedGameId,
+  isGenerationQuotaExceeded,
   selectCreatedGames,
 } from "./gameUiState.ts";
 
@@ -42,6 +44,8 @@ test("builds backward-compatible seeded and exact generated session commands", (
 test("maps generation failures to friendly UI messages without provider details", () => {
   const cases: Array<{ error: unknown; expected: RegExp }> = [
     { error: new GameApiError("RATE_LIMITED", "raw", 429), expected: /muchas familias/i },
+    // v0.9.3: the daily quota is a 429 with its own code and its own copy.
+    { error: new GameApiError("AI_GENERATION_QUOTA_EXCEEDED", "The daily AI game generation quota has been reached.", 429), expected: /por hoy ya creamos todos los juegos nuevos/i },
     // v0.9.2: only AI generation's RATE_LIMITED mentions game creation; other 429s are generic.
     { error: new GameApiError("REQUEST_THROTTLED", "raw", 429), expected: /muchas solicitudes/i },
     { error: new GameApiError("API_ERROR", "raw", 429), expected: /muchas solicitudes/i },
@@ -155,4 +159,35 @@ test("H1: the AI notice and badge are wired into the generation, single-player a
   for (const usage of ["<AiGameBadge gameId={game.id} />", "<AiGameBadge gameId={room.gameId} />"]) {
     assert.ok(multiplayer.includes(usage), `MultiplayerGame missing ${usage}`);
   }
+});
+
+test("v0.9.3: the quota copy is exact, provider-free, and only the quota code disables creation", () => {
+  const quota = new GameApiError("AI_GENERATION_QUOTA_EXCEEDED", "The daily AI game generation quota has been reached.", 429);
+  assert.equal(
+    gameUiErrorMessage(quota, "Fallback"),
+    "¡Por hoy ya creamos todos los juegos nuevos! 🌙 Mañana podrás crear más. Mientras tanto, puedes jugar los juegos que ya tienes.",
+  );
+  assert.equal(generationQuotaExceededMessage, gameUiErrorMessage(quota, "Fallback"));
+  assert.doesNotMatch(generationQuotaExceededMessage, /aws|bedrock|dynamo|quota|cuota|429/i);
+  assert.equal(isGenerationQuotaExceeded(quota), true);
+  for (const other of [
+    new GameApiError("RATE_LIMITED", "raw", 429),
+    new GameApiError("REQUEST_THROTTLED", "raw", 429),
+    new GameApiError("AI_GENERATION_FAILED", "raw", 502),
+    new Error("AI_GENERATION_QUOTA_EXCEEDED"),
+    null,
+  ]) {
+    assert.equal(isGenerationQuotaExceeded(other), false);
+  }
+});
+
+test("v0.9.3: QuizGame locks the create button after a quota rejection and keeps existing games reachable", async () => {
+  const quiz = await readFile(new URL("./QuizGame.tsx", import.meta.url), "utf8");
+  assert.match(quiz, /if \(isGenerationQuotaExceeded\(caught\)\) setGenerationQuotaReached\(true\);/);
+  assert.match(quiz, /if \(generationQuotaReached \|\| submitting\) return;/);
+  assert.match(quiz, /type="submit" disabled=\{submitting \|\| generationQuotaReached\}/);
+  assert.match(quiz, /Ver juegos disponibles/);
+  // Exactly one generateGame request per submit: no retry loop or timer around it.
+  assert.equal((quiz.match(/\.generateGame\(/g) ?? []).length, 1);
+  assert.doesNotMatch(quiz, /setTimeout\([^)]*generateGame|setInterval/);
 });

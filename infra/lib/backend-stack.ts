@@ -26,6 +26,12 @@ const defaultAudioCacheExpirationDays = 30;
 // v0.9 — ADR-018: client → server actions routed by `$request.body.action`.
 const multiplayerWebSocketActions = ["IDENTIFY", "START_GAME", "SUBMIT_ANSWER", "QUESTION_TIMEOUT", "NEXT_QUESTION", "SYNC_ROOM"];
 const multiplayerWebSocketStageName = "production";
+// v0.9.3 — ADR-021: global daily AI generation quota (admitted requests per local day).
+const defaultAiGenerationDailyLimit = 20;
+const maxAiGenerationDailyLimit = 1_000;
+const defaultAiGenerationQuotaTimeZone = "America/Guayaquil";
+// The quota items live in the multiplayer table and rely on its TTL attribute.
+const multiplayerTableTtlAttribute = "expiresAt";
 
 export interface FamilyLearningGamesBackendStackProps extends StackProps {
   aiGameGenerationEnabled?: boolean;
@@ -33,6 +39,10 @@ export interface FamilyLearningGamesBackendStackProps extends StackProps {
   bedrockValidatorModelId?: string;
   generationThrottleRateLimit?: number;
   generationThrottleBurstLimit?: number;
+  /** v0.9.3: admitted generation requests per local day (0..1000, default 20; 0 blocks generation). */
+  aiGenerationDailyLimit?: number;
+  /** v0.9.3: IANA time zone of the quota day (default America/Guayaquil). */
+  aiGenerationQuotaTimeZone?: string;
   allowedOrigins?: string[];
   /** v0.9.2: RETAIN + DynamoDB deletion protection on the four tables (default true). */
   tableDeletionProtection?: boolean;
@@ -67,6 +77,12 @@ export class FamilyLearningGamesBackendStack extends Stack {
       props?.generationThrottleBurstLimit ?? this.node.tryGetContext("generationThrottleBurstLimit") ?? defaultGenerationThrottle.burstLimit,
       "generationThrottleBurstLimit",
       true,
+    );
+    const aiGenerationDailyLimit = readAiGenerationDailyLimit(
+      props?.aiGenerationDailyLimit ?? this.node.tryGetContext("aiGenerationDailyLimit"),
+    );
+    const aiGenerationQuotaTimeZone = readTimeZoneContext(
+      props?.aiGenerationQuotaTimeZone ?? this.node.tryGetContext("aiGenerationQuotaTimeZone"),
     );
     // v0.9.2 — Infrastructure Rate Limits: API Gateway throttling and DynamoDB
     // on-demand maximum throughput (see ./rateLimits.ts and
@@ -144,7 +160,7 @@ export class FamilyLearningGamesBackendStack extends Stack {
       partitionKey: { name: "PK", type: AttributeType.STRING },
       sortKey: { name: "SK", type: AttributeType.STRING },
       billingMode: BillingMode.PAY_PER_REQUEST,
-      timeToLiveAttribute: "expiresAt",
+      timeToLiveAttribute: multiplayerTableTtlAttribute,
       ...tableProtection(rateLimits.tables.multiplayer),
     });
     // v0.9 — ADR-018: WebSocket API for real-time multiplayer, served by the same backend Lambda.
@@ -211,6 +227,11 @@ export class FamilyLearningGamesBackendStack extends Stack {
       backendEnvironment.BEDROCK_REGION = this.region;
       backendEnvironment.BEDROCK_GUARDRAIL_ID = guardrail.attrGuardrailId;
       backendEnvironment.BEDROCK_GUARDRAIL_VERSION = guardrailVersion.attrVersion;
+      // v0.9.3 — ADR-021: the quota reuses the multiplayer table (PK QUOTA#AI_GENERATION).
+      // Its existing UpdateItem grant covers the conditional reservation; no IAM change.
+      backendEnvironment.AI_GENERATION_QUOTA_TABLE_NAME = multiplayerTable.tableName;
+      backendEnvironment.AI_GENERATION_DAILY_LIMIT = String(aiGenerationDailyLimit);
+      backendEnvironment.AI_GENERATION_QUOTA_TIMEZONE = aiGenerationQuotaTimeZone;
     }
 
     // v0.9.2: no reserved concurrency. The regional account quota is 10 concurrent
@@ -406,6 +427,29 @@ function readMultiplayerMaxPlayers(value: unknown): number {
   const maxPlayers = readPositiveNumber(value ?? 8, "multiplayerMaxPlayers", true);
   if (maxPlayers < 2 || maxPlayers > 8) throw new Error("Invalid CDK context multiplayerMaxPlayers: expected an integer between 2 and 8.");
   return maxPlayers;
+}
+
+/** v0.9.3: daily admitted generations, an integer 0..1000 (0 blocks generation). */
+function readAiGenerationDailyLimit(value: unknown): number {
+  if (value === undefined) return defaultAiGenerationDailyLimit;
+  const parsed = typeof value === "number" || (typeof value === "string" && value.trim() !== "") ? Number(value) : Number.NaN;
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > maxAiGenerationDailyLimit) {
+    throw new Error(`Invalid CDK context aiGenerationDailyLimit: expected an integer between 0 and ${maxAiGenerationDailyLimit}.`);
+  }
+  return parsed;
+}
+
+/** v0.9.3: the quota day is computed in an IANA time zone; reject unknown zones at synth time. */
+function readTimeZoneContext(value: unknown): string {
+  if (value === undefined) return defaultAiGenerationQuotaTimeZone;
+  const timeZone = typeof value === "string" ? value.trim() : "";
+  try {
+    if (!timeZone) throw new Error();
+    new Intl.DateTimeFormat("en-US", { timeZone });
+  } catch {
+    throw new Error("Invalid CDK context aiGenerationQuotaTimeZone: expected an IANA time zone such as America/Guayaquil.");
+  }
+  return timeZone;
 }
 
 function readStringContext(value: unknown, defaultValue: string): string {

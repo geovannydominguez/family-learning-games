@@ -310,7 +310,7 @@ Authentication and authorization behavior implemented inside Lambda, if any, wer
 | WebSocket throttling | Pending | v0.9.2 |
 | Lambda reserved concurrency | Pending | v0.9.2 |
 | DynamoDB maximum throughput | Pending | v0.9.2 |
-| Bedrock usage quotas | Pending | v0.9.3 |
+| Bedrock usage quotas | Implemented in code (global daily generation quota, ADR-021); deploy pending | v0.9.3 |
 | Polly usage limits | Pending evaluation | v0.9.3 |
 
 ## 9. Risk Register

@@ -8,7 +8,8 @@ import type {
   Question,
 } from "../../domain/game/types.ts";
 import type { GameRepository } from "../../repositories/game/GameRepository.ts";
-import { ApplicationError } from "../errors.ts";
+import { ApplicationError, GenerationQuotaExceededError } from "../errors.ts";
+import type { DailyGenerationQuota } from "./GenerationQuota.ts";
 import {
   ExecutionBudget,
   defaultExecutionBudgetPolicy,
@@ -76,7 +77,9 @@ export interface GenerationPipelineEvent {
     | "AI_GAME_GENERATION_EXHAUSTED"
     | "AI_GAME_VALIDATION_ERROR"
     | "AI_GAME_GUARDRAIL_INTERVENED"
-    | "AI_GAME_EXECUTION_BUDGET_EXHAUSTED";
+    | "AI_GAME_EXECUTION_BUDGET_EXHAUSTED"
+    | "AI_GAME_GENERATION_QUOTA_RESERVED"
+    | "AI_GAME_GENERATION_QUOTA_EXHAUSTED";
   level: "info" | "warn" | "error";
   correlationId?: string;
   /**
@@ -155,6 +158,10 @@ export interface GenerationPipelineEvent {
   batchSize?: number;
   remainingTimeMs?: number;
   requiredTimeMs?: number;
+  /** v0.9.3 quota events: local-day period, counter after the reservation, configured limit. */
+  quotaPeriod?: string;
+  quotaUsed?: number;
+  quotaLimit?: number;
 }
 
 /**
@@ -200,6 +207,12 @@ interface GenerateGameServiceOptions {
   now?: () => number;
   /** Execution-budget thresholds (ADR-015). Defaults to `defaultExecutionBudgetPolicy`. */
   executionBudgetPolicy?: ExecutionBudgetPolicy;
+  /**
+   * v0.9.3 (ADR-021): global daily quota, reserved before any Bedrock call.
+   * Required when `enabled` is true; the constructor refuses to build an
+   * enabled service without it.
+   */
+  quota?: DailyGenerationQuota;
 }
 
 /** Non-sensitive context attached to every pipeline event of one operation. */
@@ -225,6 +238,7 @@ export class GenerateGameService {
   private readonly random: () => number;
   private readonly now: () => number;
   private readonly executionBudgetPolicy: ExecutionBudgetPolicy;
+  private readonly quota: DailyGenerationQuota | undefined;
 
   constructor(
     generator: GameGenerator,
@@ -250,6 +264,10 @@ export class GenerateGameService {
     this.random = options.random ?? Math.random;
     this.now = options.now ?? Date.now;
     this.executionBudgetPolicy = options.executionBudgetPolicy ?? defaultExecutionBudgetPolicy;
+    if (this.enabled && !options.quota) {
+      throw new Error("AI game generation requires a generation quota.");
+    }
+    this.quota = options.quota;
   }
 
   async generate(command: GenerateGameCommand): Promise<Game> {
@@ -278,6 +296,11 @@ export class GenerateGameService {
       targetAge: request.targetAge,
       topicHash: topicFingerprint(request.topic),
     };
+    // v0.9.3 (ADR-021): reserve one unit of the global daily quota only after the
+    // request is known to be well formed (cheap checks above, no Bedrock), and
+    // before the first Bedrock call. A storage failure propagates and fails
+    // closed: no model is invoked. The unit is never returned.
+    await this.reserveQuota(trace);
     const budget = new ExecutionBudget(
       typeof command.remainingTimeMs === "function" ? command.remainingTimeMs : undefined,
       this.executionBudgetPolicy,
@@ -623,6 +646,30 @@ export class GenerateGameService {
       ...(warningTypes.size > 0 ? { warningCount: warningTypes.size, warningTypes: [...warningTypes] } : {}),
     });
     return { title: meta.title, category: meta.category, questions };
+  }
+
+  private async reserveQuota(trace: GenerationTrace): Promise<void> {
+    const quota = this.quota;
+    if (!quota) throw new Error("AI game generation requires a generation quota.");
+    const decision = await quota.reserve();
+    if (!decision.allowed) {
+      this.emitEvent(trace, {
+        event: "AI_GAME_GENERATION_QUOTA_EXHAUSTED",
+        level: "warn",
+        attempt: 0,
+        quotaPeriod: decision.periodKey,
+        quotaLimit: decision.limit,
+      });
+      throw new GenerationQuotaExceededError(decision.retryAfterSeconds);
+    }
+    this.emitEvent(trace, {
+      event: "AI_GAME_GENERATION_QUOTA_RESERVED",
+      level: "info",
+      attempt: 0,
+      quotaPeriod: decision.periodKey,
+      quotaUsed: decision.used,
+      quotaLimit: decision.limit,
+    });
   }
 
   private emitEvent(
